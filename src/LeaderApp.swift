@@ -1,6 +1,6 @@
 // LeaderApp.swift — native macOS fleet panel.
 // Data: scan.py --json.  Open: launch.py.  Archive: archive.py.
-// Follows system Light/Dark, frosted-glass, floating always-on-top.
+// Follows system Light/Dark, frosted-glass; normal window level (pin is opt-in).
 import SwiftUI
 import AppKit
 import Observation
@@ -249,9 +249,10 @@ struct MouseLayer: NSViewRepresentable {
 
 // MARK: - 窗口配置 + 置顶
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    static var pinned = true
+    static var pinned = false   // window stays normal level; opt-in via the pin toolbar button
     var window: NSWindow?
     func applicationDidFinishLaunching(_ n: Notification) {
+        installScrollMonitor()                       // wheel -> embedded terminal
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.configure() }
         NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
@@ -279,7 +280,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func snapLeft() {
         guard let w = window, let scr = NSScreen.main else { return }
         let vf = scr.visibleFrame
-        w.setFrame(NSRect(x: vf.minX, y: vf.minY, width: DS.panelWidth, height: vf.height),
+        // sidebar + embedded terminal -> a wide window, left-snapped, full height.
+        let width = min(1180, vf.width)
+        w.setFrame(NSRect(x: vf.minX, y: vf.minY, width: width, height: vf.height),
                    display: true, animate: false)
     }
 }
@@ -393,7 +396,7 @@ struct FolderHeader: View {
 // MARK: - Main
 struct ContentView: View {
     @State private var store = Store()
-    @State private var pinned = true
+    @State private var pinned = false   // window-level always-on-top, opt-in
     @State private var mode: Mode = .active
     @State private var hoveredID: String?
     @State private var collapsed: Set<String> = []
@@ -402,6 +405,7 @@ struct ContentView: View {
     @State private var query = ""
     @State private var staleExpanded = false
     @State private var selectedID: String?
+    @State private var activeSID: String?            // session embedded in the main area
     @FocusState private var focus: Focus?
     @AppStorage("leader.grouped") private var grouped = true
     @Environment(\.colorScheme) private var scheme
@@ -442,7 +446,12 @@ struct ContentView: View {
         }
     }
     private func openSelected() {
-        if let id = selectedID, let s = navList.first(where: { $0.id == id }) { store.open(s) }
+        if let id = selectedID, let s = navList.first(where: { $0.id == id }) { openEmbedded(s) }
+    }
+    // Click / Enter: embed the session in the main area (instead of a kitty window).
+    private func openEmbedded(_ s: Session) {
+        selectedID = s.id
+        activeSID = s.id
     }
     private func beginRename(_ s: Session) {
         renameText = s.nickname ?? s.title ?? ""
@@ -491,6 +500,31 @@ struct ContentView: View {
     }
 
     var body: some View {
+        HSplitView {
+            sidebar
+                .frame(minWidth: 280, idealWidth: DS.panelWidth, maxWidth: 460,
+                       maxHeight: .infinity)
+            terminalArea
+                .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 820, minHeight: 480)
+        .onAppear { store.start(); focus = .list }
+        // Headless E2E hook: LEADER_AUTOSELECT=1 auto-embeds the first session once
+        // sessions load, so the embed path can be verified without clicking (no focus steal).
+        .onChange(of: store.sessions.count) {
+            guard activeSID == nil,
+                  ProcessInfo.processInfo.environment["LEADER_AUTOSELECT"] == "1",
+                  let first = navList.first else { return }
+            openEmbedded(first)
+        }
+        .sheet(item: $renameTarget) { s in
+            RenameSheet(session: s, text: $renameText,
+                        onSave: { store.setNickname(s, $0); renameTarget = nil },
+                        onCancel: { renameTarget = nil })
+        }
+    }
+
+    private var sidebar: some View {
         VStack(spacing: 0) {
             header
             Picker("视图", selection: $mode) {
@@ -513,11 +547,19 @@ struct ContentView: View {
         .onKeyPress(.downArrow) { moveSelection(1); return .handled }
         .onKeyPress(.return) { openSelected(); return .handled }
         .overlay(alignment: .bottom) { toast }
-        .onAppear { store.start(); focus = .list }
-        .sheet(item: $renameTarget) { s in
-            RenameSheet(session: s, text: $renameText,
-                        onSave: { store.setNickname(s, $0); renameTarget = nil },
-                        onCancel: { renameTarget = nil })
+    }
+
+    @ViewBuilder private var terminalArea: some View {
+        if let id = activeSID, let s = store.sessions.first(where: { $0.id == id }) {
+            TerminalContainer(sid: s.full_sid, cwd: s.cwd ?? "~")
+        } else {
+            VStack(spacing: 10) {
+                Image(systemName: "terminal").font(.system(size: 40)).foregroundStyle(.tertiary)
+                Text("点击左侧会话,在此嵌入运行 claude").foregroundStyle(.secondary).font(.callout)
+                Text("再次点击切换 · 关掉单个会话可释放资源").foregroundStyle(.tertiary).font(.caption)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
         }
     }
 
@@ -626,7 +668,7 @@ struct ContentView: View {
 
     private func sessionRow(_ s: Session) -> some View {
         Row(s: s, archiveSymbol: "archivebox",
-            onOpen: { store.open(s) }, onArchive: { store.setArchived(s, true) },
+            onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, true) },
             onPin: { store.setPinned(s, !s.pinned) }, onRename: { beginRename(s) },
             selected: selectedID == s.id, hoveredID: $hoveredID)
     }
@@ -662,7 +704,7 @@ struct ContentView: View {
         } else {
             ForEach(items) { s in
                 Row(s: s, archiveSymbol: "tray.and.arrow.up",
-                    onOpen: { store.open(s) }, onArchive: { store.setArchived(s, false) },
+                    onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, false) },
                     onRename: { beginRename(s) }, showPin: false,
                     selected: selectedID == s.id, hoveredID: $hoveredID)
             }
@@ -713,6 +755,6 @@ struct LeaderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     var body: some Scene {
         WindowGroup { ContentView() }
-            .windowResizability(.contentSize)
+            .windowResizability(.contentMinSize)
     }
 }

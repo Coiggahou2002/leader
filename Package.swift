@@ -19,7 +19,7 @@ let package = Package(
                 "launch.py", "makeicon.swift", "name.py", "pin.py", "scan.py",
                 "server.py", "start.sh", "test_switch.py",
             ],
-            sources: ["LeaderApp.swift"]
+            sources: ["LeaderApp.swift", "EmbeddedTerminal.swift"]
         )
     ]
 )

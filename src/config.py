@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""leader/config.py — single place for all paths & machine-specific settings.
+
+Defaults are sensible & path-portable ($HOME based). Override any of them in
+  ~/.config/leader/config.json
+e.g.  {"proxy": "127.0.0.1:6789", "new_session_cwd": "~/dev/impl",
+       "worktree_repos": ["~/dev/impl"]}
+"""
+import json, os
+
+HOME = os.path.expanduser("~")
+
+_DEFAULTS = {
+    # where leader keeps its own state (windows/archived/pinned/names)
+    "data_dir": "~/.claude/leader",
+    # claude transcripts live here (fixed by Claude Code)
+    "projects_dir": "~/.claude/projects",
+    "kitty_bin": "/Applications/kitty.app/Contents/MacOS/kitty",
+    "kitty_socket": "unix:/tmp/leader-kitty.sock",
+    # "" -> resolve via `command -v claude` at launch time
+    "claude_bin": "",
+    # "" -> no proxy; or "host:port" (http for http/https, socks5 for all_proxy)
+    "proxy": "",
+    # default folder for the "+" new-session button
+    "new_session_cwd": "~",
+    # optional: git repos to enrich with ahead/dirty + agent-worktree cleanup
+    "worktree_repos": [],
+}
+
+def _load() -> dict:
+    cfg = dict(_DEFAULTS)
+    try:
+        with open(os.path.expanduser("~/.config/leader/config.json")) as f:
+            cfg.update(json.load(f))
+    except Exception:
+        pass
+    return cfg
+
+_C = _load()
+
+def data_dir() -> str:
+    d = os.path.expanduser(_C["data_dir"])
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def data_file(name: str) -> str:
+    return os.path.join(data_dir(), name)
+
+def projects_dir() -> str:
+    return os.path.expanduser(_C["projects_dir"])
+
+KITTY = os.path.expanduser(_C["kitty_bin"])
+SOCK = _C["kitty_socket"]
+
+def proxy_cmd() -> str:
+    """Shell snippet to export proxy vars, or ':' (no-op) when disabled."""
+    p = (_C.get("proxy") or "").strip()
+    if not p:
+        return ":"
+    return f"export https_proxy=http://{p} http_proxy=http://{p} all_proxy=socks5://{p}"
+
+def claude_fallback() -> str:
+    cb = (_C.get("claude_bin") or "").strip()
+    return os.path.expanduser(cb) if cb else os.path.join(HOME, ".local/bin/claude")
+
+def new_session_cwd() -> str:
+    return os.path.expanduser(_C.get("new_session_cwd") or "~")
+
+def worktree_repos() -> list:
+    return [os.path.expanduser(r) for r in (_C.get("worktree_repos") or [])]
+
+def short_path(p: str) -> str:
+    """~/dev/foo  <- /Users/you/dev/foo  (display helper)"""
+    return (p or "").replace(HOME + "/", "~/")

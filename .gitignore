@@ -1,0 +1,10 @@
+dist/
+.build/
+__pycache__/
+*.pyc
+# generated build artifacts (produced by build.sh / makeicon.swift)
+src/Leader.bin
+src/AppIcon.icns
+src/Leader.iconset/
+# local data / config never belongs in the repo
+config.json

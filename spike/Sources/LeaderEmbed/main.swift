@@ -139,11 +139,35 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
     // events to claude: claude's mouse-reporting mode turns forwarded wheel
     // events into on-screen garbage. The original "can't scroll" bug was only
     // that trackpad precise deltas have deltaY==0, which SwiftTerm drops.
+    private var scrollAccum: CGFloat = 0
     func handleScroll(_ event: NSEvent) -> Bool {
-        guard terminal != nil else { return false }
-        let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY
+        guard let term = terminal else { return false }
+        let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY * 12
         if dy == 0 { return true }
-        let v = max(1, Int(abs(dy) / (event.hasPreciseScrollingDeltas ? 3 : 1)))
+        // Alt-screen TUI (claude) with mouse reporting: it owns scrolling and has
+        // no local scrollback. Forward the wheel to it as kitty does — but THROTTLE
+        // to whole wheel ticks (one event each), or claude's redraw flood tears.
+        if term.isCurrentBufferAlternate && allowMouseReporting && term.mouseMode != .off {
+            scrollAccum += dy
+            let perTick: CGFloat = 12
+            var ticks = 0
+            while abs(scrollAccum) >= perTick && ticks < 8 {
+                let up = scrollAccum > 0
+                scrollAccum += up ? -perTick : perTick
+                ticks += 1
+                let flags = term.encodeButton(button: up ? 4 : 5, release: false,
+                    shift: event.modifierFlags.contains(.shift),
+                    meta: event.modifierFlags.contains(.option),
+                    control: event.modifierFlags.contains(.control))
+                let p = convert(event.locationInWindow, from: nil)
+                let col = min(term.cols, max(1, Int(p.x / (bounds.width / CGFloat(max(1, term.cols)))) + 1))
+                let row = min(term.rows, max(1, term.rows - Int(p.y / (bounds.height / CGFloat(max(1, term.rows))))))
+                term.sendEvent(buttonFlags: flags, x: col, y: row)
+            }
+            return true
+        }
+        // Normal buffer: scroll our own scrollback (also fixes trackpad precise).
+        let v = max(1, Int(abs(dy) / 12))
         if dy > 0 { scrollUp(lines: v) } else { scrollDown(lines: v) }
         return true
     }

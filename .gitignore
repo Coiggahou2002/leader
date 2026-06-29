@@ -8,3 +8,5 @@ src/AppIcon.icns
 src/Leader.iconset/
 # local data / config never belongs in the repo
 config.json
+# spike build artifacts
+spike/.build/

@@ -87,7 +87,7 @@ final class TerminalManager: ObservableObject {
 
     func terminal(for s: Session) -> LocalProcessTerminalView {
         if let v = views[s.full_sid] { return v }
-        let tv = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let tv = EmbeddedTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         applyTheme(tv)
         delegate.owner = self
         delegate.sidByView[ObjectIdentifier(tv)] = s.full_sid
@@ -121,6 +121,41 @@ final class TermDelegate: LocalProcessTerminalViewDelegate {
         guard let tv = source as? LocalProcessTerminalView,
               let sid = sidByView[ObjectIdentifier(tv)] else { return }
         DispatchQueue.main.async { self.owner?.markExited(sid) }
+    }
+}
+
+// SwiftTerm's stock scrollWheel always scrolls its own scrollback and never
+// forwards the wheel to the child. claude runs a full-screen TUI (alternate
+// buffer + mouse reporting), so its scrollback is empty -> the wheel does
+// nothing. Forward the wheel to the app in that mode; otherwise scroll locally
+// (and handle trackpad precise deltas, which the stock deltaY==0 guard drops).
+final class EmbeddedTerminalView: LocalProcessTerminalView {
+    // Handle a scroll event. Returns true if consumed (caller swallows it).
+    // SwiftTerm's own scrollWheel is `public override` (not `open`), so a local
+    // event monitor calls this before dispatch instead.
+    //
+    // We deliberately scroll SwiftTerm's OWN buffer (the same path drag-select
+    // auto-scroll uses, which renders cleanly) rather than forwarding wheel
+    // events to claude: claude's mouse-reporting mode turns forwarded wheel
+    // events into on-screen garbage. The original "can't scroll" bug was only
+    // that trackpad precise deltas have deltaY==0, which SwiftTerm drops.
+    func handleScroll(_ event: NSEvent) -> Bool {
+        guard terminal != nil else { return false }
+        let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY
+        if dy == 0 { return true }
+        let v = max(1, Int(abs(dy) / (event.hasPreciseScrollingDeltas ? 3 : 1)))
+        if dy > 0 { scrollUp(lines: v) } else { scrollDown(lines: v) }
+        return true
+    }
+}
+
+func installScrollMonitor() {
+    NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+        guard let content = event.window?.contentView else { return event }
+        var v: NSView? = content.hitTest(event.locationInWindow)
+        while let cur = v, !(cur is EmbeddedTerminalView) { v = cur.superview }
+        guard let term = v as? EmbeddedTerminalView else { return event }
+        return term.handleScroll(event) ? nil : event
     }
 }
 
@@ -222,6 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        installScrollMonitor()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             NSApp.windows.first?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)

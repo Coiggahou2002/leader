@@ -298,16 +298,31 @@ struct Row: View {
     var showPin: Bool = true
     var selected: Bool = false
     @Binding var hoveredID: String?
+    @ObservedObject var term = TerminalManager.shared   // embed state (running/exited)
     // single shared hovered id -> at most one row highlights, even mid-scroll
     private var hover: Bool { hoveredID == s.id }
     private var dotColor: Color { s.needsAttention ? .red : (s.alive ? .green : .secondary) }
+    // embedded-terminal badge: filled+green while the in-app claude runs, hollow
+    // grey once it exits, nothing if the session was never embedded.
+    private var embedSymbol: String? {
+        if term.running.contains(s.full_sid) { return "terminal.fill" }
+        if term.exited.contains(s.full_sid) { return "terminal" }
+        return nil
+    }
+    private var embedColor: Color { term.running.contains(s.full_sid) ? .green : .secondary }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: DS.gap + 3) {
             Circle().fill(dotColor).frame(width: 7, height: 7)
                 .alignmentGuide(.firstTextBaseline) { d in d[.bottom] - 2 }
             VStack(alignment: .leading, spacing: 2) {
-                Text(s.name).font(.callout).bold().lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(s.name).font(.callout).bold().lineLimit(1)
+                    if let sym = embedSymbol {
+                        Image(systemName: sym).font(.caption2).foregroundStyle(embedColor)
+                            .help(sym == "terminal.fill" ? "已嵌入运行" : "已嵌入(进程已退出)")
+                    }
+                }
                 Text("\(s.repo)@\(s.branch ?? "?") · \(s.ago)前 · \(s.msgs)条/\(s.tok)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 if s.needsAttention, !s.why.isEmpty {
@@ -551,7 +566,10 @@ struct ContentView: View {
 
     @ViewBuilder private var terminalArea: some View {
         if let id = activeSID, let s = store.sessions.first(where: { $0.id == id }) {
-            TerminalContainer(sid: s.full_sid, cwd: s.cwd ?? "~")
+            VStack(spacing: 0) {
+                terminalHeader(s)
+                TerminalContainer(sid: s.full_sid, cwd: s.cwd ?? "~")
+            }
         } else {
             VStack(spacing: 10) {
                 Image(systemName: "terminal").font(.system(size: 40)).foregroundStyle(.tertiary)
@@ -561,6 +579,28 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
         }
+    }
+
+    // Thin bar above the embedded terminal: which session is running + a close
+    // button that kills the in-app process but leaves the list item in place.
+    private func terminalHeader(_ s: Session) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "terminal").foregroundStyle(.secondary)
+            Text(s.name).font(.callout).bold().lineLimit(1)
+            Text(s.full_sid).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            Spacer(minLength: 8)
+            Button("在 kitty 窗口打开", systemImage: "rectangle.on.rectangle") { store.open(s) }
+                .buttonStyle(.plain).labelStyle(.iconOnly).foregroundStyle(.secondary)
+                .help("在独立 kitty 窗口打开(全屏 TUI 滚动用)")
+            Button("关闭会话终端", systemImage: "xmark.circle.fill") {
+                TerminalManager.shared.close(s.full_sid)
+                activeSID = nil
+            }
+            .buttonStyle(.plain).labelStyle(.iconOnly).foregroundStyle(.secondary)
+            .help("杀掉嵌入的 claude 进程(列表项保留)")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 7)
+        .background(.bar)
     }
 
     private var header: some View {

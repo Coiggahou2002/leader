@@ -300,7 +300,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         installScrollMonitor()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+            if let w = NSApp.windows.first {
+                w.level = .floating        // always-on-top (matches Leader's product direction)
+                w.makeKeyAndOrderFront(nil)
+            }
             NSApp.activate(ignoringOtherApps: true)
         }
     }

@@ -140,6 +140,27 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
     // events into on-screen garbage. The original "can't scroll" bug was only
     // that trackpad precise deltas have deltaY==0, which SwiftTerm drops.
     private var scrollAccum: CGFloat = 0
+    private var pendingSettle = false
+
+    // claude scrolls via region-scroll: the model shifts correctly but SwiftTerm
+    // only marks the newly-written row dirty, so shifted rows keep stale pixels
+    // (the garbling). Force full repaints over the window where claude's async
+    // redraw lands. Debounced so a scroll burst schedules one set, not hundreds.
+    private func scheduleSettleRefresh() {
+        if pendingSettle { return }
+        pendingSettle = true
+        for ms in [40, 110, 230] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { [weak self] in
+                guard let self, let t = self.terminal else { return }
+                t.updateFullScreen()
+                self.setNeedsDisplay(self.bounds)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+            self?.pendingSettle = false
+        }
+    }
+
     func handleScroll(_ event: NSEvent) -> Bool {
         guard let term = terminal else { return false }
         let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY * 12
@@ -164,6 +185,7 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
                 let row = min(term.rows, max(1, term.rows - Int(p.y / (bounds.height / CGFloat(max(1, term.rows))))))
                 term.sendEvent(buttonFlags: flags, x: col, y: row)
             }
+            if ticks > 0 { scheduleSettleRefresh() }
             return true
         }
         // Normal buffer: scroll our own scrollback (also fixes trackpad precise).

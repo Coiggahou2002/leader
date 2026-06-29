@@ -140,24 +140,20 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
     // events into on-screen garbage. The original "can't scroll" bug was only
     // that trackpad precise deltas have deltaY==0, which SwiftTerm drops.
     private var scrollAccum: CGFloat = 0
-    private var pendingSettle = false
 
-    // claude scrolls via region-scroll: the model shifts correctly but SwiftTerm
-    // only marks the newly-written row dirty, so shifted rows keep stale pixels
-    // (the garbling). Force full repaints over the window where claude's async
-    // redraw lands. Debounced so a scroll burst schedules one set, not hundreds.
-    private func scheduleSettleRefresh() {
-        if pendingSettle { return }
-        pendingSettle = true
-        for ms in [40, 110, 230] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { [weak self] in
-                guard let self, let t = self.terminal else { return }
-                t.updateFullScreen()
-                self.setNeedsDisplay(self.bounds)
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
-            self?.pendingSettle = false
+    // The garbling root cause: SwiftTerm's drawTerminalContents only paints the
+    // rows covered by the dirtyRect, and claude's async scroll redraw invalidates
+    // only a partial region (new row + edges) — so the shifted center keeps stale
+    // pixels. Timing-based forced repaints can't catch the async redraw reliably.
+    // Instead, while the app owns the screen (alt-screen TUI), promote EVERY
+    // invalidation to a full-view invalidation, so claude's own redraw always
+    // repaints the whole grid (this is what WezTerm does every frame). The normal
+    // buffer keeps SwiftTerm's efficient incremental path.
+    public override func setNeedsDisplay(_ invalidRect: NSRect) {
+        if let t = terminal, t.isCurrentBufferAlternate {
+            super.setNeedsDisplay(bounds)
+        } else {
+            super.setNeedsDisplay(invalidRect)
         }
     }
 
@@ -185,7 +181,6 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
                 let row = min(term.rows, max(1, term.rows - Int(p.y / (bounds.height / CGFloat(max(1, term.rows))))))
                 term.sendEvent(buttonFlags: flags, x: col, y: row)
             }
-            if ticks > 0 { scheduleSettleRefresh() }
             return true
         }
         // Normal buffer: scroll our own scrollback (also fixes trackpad precise).

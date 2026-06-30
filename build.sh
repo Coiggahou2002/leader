@@ -2,27 +2,36 @@
 # Build a self-contained Leader.app into ./dist (does NOT touch ~/Applications).
 # The python backend is bundled inside the app (Contents/Resources/backend),
 # so the built app has no dependency on this source tree.
+#
+# Build is SwiftPM-based (Package.swift) because the app embeds SwiftTerm.
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 SRC="$ROOT/src"
 APP="$ROOT/dist/Leader.app"
-TMP="$ROOT/.build"
-mkdir -p "$TMP"
+ASSET="$ROOT/.assets"          # NOT .build — that belongs to SwiftPM
+mkdir -p "$ASSET"
 
 echo "→ icon (makeicon.swift)"
-rm -rf "$TMP/Leader.iconset" "$TMP/AppIcon.icns"
-swift "$SRC/makeicon.swift" "$TMP/Leader.iconset" >/dev/null
-iconutil -c icns "$TMP/Leader.iconset" -o "$TMP/AppIcon.icns"
+rm -rf "$ASSET/Leader.iconset" "$ASSET/AppIcon.icns"
+swift "$SRC/makeicon.swift" "$ASSET/Leader.iconset" >/dev/null
+iconutil -c icns "$ASSET/Leader.iconset" -o "$ASSET/AppIcon.icns"
 
-echo "→ compile (swiftc)"
-swiftc -O -swift-version 5 -parse-as-library -framework SwiftUI -framework AppKit \
-  "$SRC/LeaderApp.swift" -o "$TMP/Leader"
+echo "→ compile (swift build -c release)"
+swift build -c release
+BIN="$(swift build -c release --show-bin-path)"
 
 echo "→ assemble bundle"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/backend"
-cp "$TMP/Leader" "$APP/Contents/MacOS/Leader"
-cp "$TMP/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$BIN/Leader" "$APP/Contents/MacOS/Leader"
+cp "$ASSET/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+# SwiftPM resource bundles (e.g. SwiftTerm_SwiftTerm.bundle, which carries
+# Shaders.metal for the Metal renderer). Bundle.module resolves these from
+# Contents/Resources at runtime; without them the Metal path silently falls
+# back to CoreGraphics.
+for b in "$BIN"/*.bundle; do
+  [ -e "$b" ] && cp -R "$b" "$APP/Contents/Resources/"
+done
 for f in config.py scan.py launch.py archive.py pin.py name.py; do
   cp "$SRC/$f" "$APP/Contents/Resources/backend/$f"
 done
@@ -44,6 +53,6 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 codesign --force --deep --sign - "$APP" 2>/dev/null || true
-rm -rf "$TMP"
+rm -rf "$ASSET"
 echo "✅ built: $APP"
 echo "   安装: cp -R dist/Leader.app ~/Applications/   (然后双击运行)"

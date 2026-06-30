@@ -1,6 +1,6 @@
 // LeaderApp.swift — native macOS fleet panel.
 // Data: scan.py --json.  Open: launch.py.  Archive: archive.py.
-// Follows system Light/Dark, frosted-glass, floating always-on-top.
+// Follows system Light/Dark, frosted-glass; normal window level (pin is opt-in).
 import SwiftUI
 import AppKit
 import Observation
@@ -162,7 +162,7 @@ final class Store {
         guard let i = sessions.firstIndex(where: { $0.id == id }) else { return }
         withAnimation(.easeInOut(duration: 0.15)) { change(&sessions[i]) }
     }
-    private func flash(_ m: String) {
+    func flash(_ m: String) {
         toast = m
         Task { try? await Task.sleep(for: .seconds(2)); if toast == m { toast = nil } }
     }
@@ -249,9 +249,10 @@ struct MouseLayer: NSViewRepresentable {
 
 // MARK: - 窗口配置 + 置顶
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    static var pinned = true
+    static var pinned = false   // window stays normal level; opt-in via the pin toolbar button
     var window: NSWindow?
     func applicationDidFinishLaunching(_ n: Notification) {
+        installScrollMonitor()                       // wheel -> embedded terminal
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.configure() }
         NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
@@ -279,8 +280,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func snapLeft() {
         guard let w = window, let scr = NSScreen.main else { return }
         let vf = scr.visibleFrame
-        w.setFrame(NSRect(x: vf.minX, y: vf.minY, width: DS.panelWidth, height: vf.height),
+        // sidebar + embedded terminal -> a wide window, left-snapped, full height.
+        let width = min(1180, vf.width)
+        w.setFrame(NSRect(x: vf.minX, y: vf.minY, width: width, height: vf.height),
                    display: true, animate: false)
+    }
+    // Quitting kills every embedded claude. Confirm if any session is live so a
+    // stray Cmd+Q doesn't tear down running work.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let n = TerminalManager.shared.running.count
+        guard n > 0 else { return .terminateNow }
+        let a = NSAlert()
+        a.messageText = "退出 Leader?"
+        a.informativeText = "还有 \(n) 个嵌入的会话在运行,退出会杀掉它们的进程(transcript 已持久化,可重新 resume)。"
+        a.addButton(withTitle: "退出")
+        a.addButton(withTitle: "取消")
+        a.alertStyle = .warning
+        return a.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
     }
 }
 
@@ -295,16 +311,31 @@ struct Row: View {
     var showPin: Bool = true
     var selected: Bool = false
     @Binding var hoveredID: String?
+    @ObservedObject var term = TerminalManager.shared   // embed state (running/exited)
     // single shared hovered id -> at most one row highlights, even mid-scroll
     private var hover: Bool { hoveredID == s.id }
     private var dotColor: Color { s.needsAttention ? .red : (s.alive ? .green : .secondary) }
+    // embedded-terminal badge: filled+green while the in-app claude runs, hollow
+    // grey once it exits, nothing if the session was never embedded.
+    private var embedSymbol: String? {
+        if term.running.contains(s.full_sid) { return "terminal.fill" }
+        if term.exited.contains(s.full_sid) { return "terminal" }
+        return nil
+    }
+    private var embedColor: Color { term.running.contains(s.full_sid) ? .green : .secondary }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: DS.gap + 3) {
             Circle().fill(dotColor).frame(width: 7, height: 7)
                 .alignmentGuide(.firstTextBaseline) { d in d[.bottom] - 2 }
             VStack(alignment: .leading, spacing: 2) {
-                Text(s.name).font(.callout).bold().lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(s.name).font(.callout).bold().lineLimit(1)
+                    if let sym = embedSymbol {
+                        Image(systemName: sym).font(.caption2).foregroundStyle(embedColor)
+                            .help(sym == "terminal.fill" ? "已嵌入运行" : "已嵌入(进程已退出)")
+                    }
+                }
                 Text("\(s.repo)@\(s.branch ?? "?") · \(s.ago)前 · \(s.msgs)条/\(s.tok)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 if s.needsAttention, !s.why.isEmpty {
@@ -393,7 +424,7 @@ struct FolderHeader: View {
 // MARK: - Main
 struct ContentView: View {
     @State private var store = Store()
-    @State private var pinned = true
+    @State private var pinned = false   // window-level always-on-top, opt-in
     @State private var mode: Mode = .active
     @State private var hoveredID: String?
     @State private var collapsed: Set<String> = []
@@ -402,6 +433,10 @@ struct ContentView: View {
     @State private var query = ""
     @State private var staleExpanded = false
     @State private var selectedID: String?
+    @State private var activeSID: String?            // session embedded in the main area
+    // A just-created session: embedded immediately at a known sid, before the
+    // scanner (every 6s) picks it up into store.sessions.
+    @State private var pendingNew: (sid: String, cwd: String)?
     @FocusState private var focus: Focus?
     @AppStorage("leader.grouped") private var grouped = true
     @Environment(\.colorScheme) private var scheme
@@ -442,7 +477,25 @@ struct ContentView: View {
         }
     }
     private func openSelected() {
-        if let id = selectedID, let s = navList.first(where: { $0.id == id }) { store.open(s) }
+        if let id = selectedID, let s = navList.first(where: { $0.id == id }) { openEmbedded(s) }
+    }
+    // Click / Enter: embed the session in the main area (instead of a kitty window).
+    private func openEmbedded(_ s: Session) {
+        selectedID = s.id
+        activeSID = s.id
+    }
+    // "+": start a fresh session embedded right here. We mint the sid so there's no
+    // race to discover it; claude --session-id starts the conversation at that id.
+    private func newEmbeddedSession() {
+        let sid = UUID().uuidString.lowercased()
+        let cwd = Conf.newCwd.isEmpty ? "~" : Conf.newCwd
+        _ = TerminalManager.shared.newSession(sid: sid, cwd: cwd)
+        pendingNew = (sid, cwd)
+        selectedID = sid
+        activeSID = sid
+        store.flash("已新建会话")
+        // pull the new session into the list once its transcript lands
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { store.refresh() }
     }
     private func beginRename(_ s: Session) {
         renameText = s.nickname ?? s.title ?? ""
@@ -491,6 +544,23 @@ struct ContentView: View {
     }
 
     var body: some View {
+        HSplitView {
+            sidebar
+                .frame(minWidth: 280, idealWidth: DS.panelWidth, maxWidth: 460,
+                       maxHeight: .infinity)
+            terminalArea
+                .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 820, minHeight: 480)
+        .onAppear { store.start(); focus = .list }
+        .sheet(item: $renameTarget) { s in
+            RenameSheet(session: s, text: $renameText,
+                        onSave: { store.setNickname(s, $0); renameTarget = nil },
+                        onCancel: { renameTarget = nil })
+        }
+    }
+
+    private var sidebar: some View {
         VStack(spacing: 0) {
             header
             Picker("视图", selection: $mode) {
@@ -513,12 +583,64 @@ struct ContentView: View {
         .onKeyPress(.downArrow) { moveSelection(1); return .handled }
         .onKeyPress(.return) { openSelected(); return .handled }
         .overlay(alignment: .bottom) { toast }
-        .onAppear { store.start(); focus = .list }
-        .sheet(item: $renameTarget) { s in
-            RenameSheet(session: s, text: $renameText,
-                        onSave: { store.setNickname(s, $0); renameTarget = nil },
-                        onCancel: { renameTarget = nil })
+    }
+
+    // What to embed for the current activeSID: a scanned session if known, else
+    // the just-created pending one (which has no Session yet).
+    private struct ActiveEmbed { let sid: String; let cwd: String; let name: String; let session: Session? }
+    private var activeEmbed: ActiveEmbed? {
+        guard let id = activeSID else { return nil }
+        if let s = store.sessions.first(where: { $0.id == id }) {
+            return ActiveEmbed(sid: s.full_sid, cwd: s.cwd ?? "~", name: s.name, session: s)
         }
+        if let p = pendingNew, p.sid == id {
+            return ActiveEmbed(sid: p.sid, cwd: p.cwd, name: "新会话", session: nil)
+        }
+        return nil
+    }
+
+    @ViewBuilder private var terminalArea: some View {
+        if let info = activeEmbed {
+            VStack(spacing: 0) {
+                terminalHeader(sid: info.sid, name: info.name, session: info.session)
+                TerminalContainer(sid: info.sid, cwd: info.cwd)
+            }
+        } else {
+            VStack(spacing: 10) {
+                Image(systemName: "terminal").font(.system(size: 40)).foregroundStyle(.tertiary)
+                Text("点击左侧会话,在此嵌入运行 claude").foregroundStyle(.secondary).font(.callout)
+                Text("再次点击切换 · 关掉单个会话可释放资源").foregroundStyle(.tertiary).font(.caption)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
+        }
+    }
+
+    // Thin bar above the embedded terminal: which session is running + a close
+    // button that kills the in-app process but leaves the list item in place.
+    // `session` is nil for a just-created session not yet in the scanned list —
+    // the kitty escape hatch needs a real Session, so it's hidden until then.
+    private func terminalHeader(sid: String, name: String, session: Session?) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "terminal").foregroundStyle(.secondary)
+            Text(name).font(.callout).bold().lineLimit(1)
+            Text(sid).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            Spacer(minLength: 8)
+            if let s = session {
+                Button("在 kitty 窗口打开", systemImage: "rectangle.on.rectangle") { store.open(s) }
+                    .buttonStyle(.plain).labelStyle(.iconOnly).foregroundStyle(.secondary)
+                    .help("在独立 kitty 窗口打开(全屏 TUI 滚动用)")
+            }
+            Button("关闭会话终端", systemImage: "xmark.circle.fill") {
+                TerminalManager.shared.close(sid)
+                if pendingNew?.sid == sid { pendingNew = nil }
+                activeSID = nil
+            }
+            .buttonStyle(.plain).labelStyle(.iconOnly).foregroundStyle(.secondary)
+            .help("杀掉嵌入的 claude 进程(列表项保留)")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 7)
+        .background(.bar)
     }
 
     private var header: some View {
@@ -527,7 +649,7 @@ struct ContentView: View {
                 HStack(spacing: 5) { Text("👨🏻‍💼"); Text("Leader").bold() }.font(.headline)
                 if store.loading { ProgressView().controlSize(.small).padding(.leading, 2) }
                 Spacer()
-                Button("新建会话", systemImage: "plus", action: { store.newSession(Self.newCwd) })
+                Button("新建会话", systemImage: "plus", action: newEmbeddedSession)
                     .buttonStyle(.plain).labelStyle(.iconOnly)
                     .foregroundStyle(.secondary).help("在 impl 新建一个会话")
                 Button(grouped ? "按文件夹分组" : "按最近使用",
@@ -626,7 +748,7 @@ struct ContentView: View {
 
     private func sessionRow(_ s: Session) -> some View {
         Row(s: s, archiveSymbol: "archivebox",
-            onOpen: { store.open(s) }, onArchive: { store.setArchived(s, true) },
+            onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, true) },
             onPin: { store.setPinned(s, !s.pinned) }, onRename: { beginRename(s) },
             selected: selectedID == s.id, hoveredID: $hoveredID)
     }
@@ -662,7 +784,7 @@ struct ContentView: View {
         } else {
             ForEach(items) { s in
                 Row(s: s, archiveSymbol: "tray.and.arrow.up",
-                    onOpen: { store.open(s) }, onArchive: { store.setArchived(s, false) },
+                    onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, false) },
                     onRename: { beginRename(s) }, showPin: false,
                     selected: selectedID == s.id, hoveredID: $hoveredID)
             }
@@ -713,6 +835,6 @@ struct LeaderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     var body: some Scene {
         WindowGroup { ContentView() }
-            .windowResizability(.contentSize)
+            .windowResizability(.contentMinSize)
     }
 }

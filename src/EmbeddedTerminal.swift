@@ -72,13 +72,26 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
     // must NOT be a drag region or left-drag moves the window instead of selecting
     // text. Default is true for non-opaque views, so force it off here.
     override var mouseDownCanMoveWindow: Bool { false }
+    // While this is non-past, promote every invalidation to a full repaint. Set
+    // after a resize: claude reflows and streams its redraw over the PTY, and
+    // SwiftTerm's partial repaint would otherwise leave the old layout's pixels
+    // under the new frame.
+    private var fullRepaintUntil: Date = .distantPast
     // Promote any invalidation to a full repaint while the app owns an alt-screen
-    // (claude /tui fullscreen) — SwiftTerm's partial repaint leaves stale cells.
-    // Normal buffer keeps the efficient incremental path. (Known limitation: even a
-    // full repaint doesn't fully fix fullscreen scroll; /tui default scrolls fine.)
+    // (claude /tui fullscreen) — SwiftTerm's partial repaint leaves stale cells —
+    // or during the post-resize window. Normal buffer otherwise keeps the efficient
+    // incremental path. (Known limitation: even a full repaint doesn't fully fix
+    // fullscreen *scroll*; /tui default scrolls fine.)
     public override func setNeedsDisplay(_ invalidRect: NSRect) {
-        if let t = terminal, t.isCurrentBufferAlternate { super.setNeedsDisplay(bounds) }
+        let alt = terminal?.isCurrentBufferAlternate ?? false
+        if alt || Date() < fullRepaintUntil { super.setNeedsDisplay(bounds) }
         else { super.setNeedsDisplay(invalidRect) }
+    }
+    public override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)               // emulator reflows + SIGWINCH
+        fullRepaintUntil = Date().addingTimeInterval(0.8)
+        terminal?.updateFullScreen()
+        needsDisplay = true
     }
     func handleScroll(_ event: NSEvent) -> Bool {
         guard let term = terminal else { return false }

@@ -25,6 +25,13 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/backend"
 cp "$BIN/Leader" "$APP/Contents/MacOS/Leader"
 cp "$ASSET/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+# SwiftPM resource bundles (e.g. SwiftTerm_SwiftTerm.bundle, which carries
+# Shaders.metal for the Metal renderer). Bundle.module resolves these from
+# Contents/Resources at runtime; without them the Metal path silently falls
+# back to CoreGraphics.
+for b in "$BIN"/*.bundle; do
+  [ -e "$b" ] && cp -R "$b" "$APP/Contents/Resources/"
+done
 for f in config.py scan.py launch.py archive.py pin.py name.py; do
   cp "$SRC/$f" "$APP/Contents/Resources/backend/$f"
 done

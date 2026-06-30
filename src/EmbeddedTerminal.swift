@@ -85,10 +85,16 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
             try setUseMetal(true)
             // claude's TUI repaints most of the screen each frame.
             metalBufferingMode = .perFrameAggregated
-            NSLog("[Leader] Metal renderer ENABLED (perFrameAggregated)")
+            Self.writeMetalStatus("ENABLED (perFrameAggregated), usingMetal=\(isUsingMetalRenderer)")
         } catch {
-            NSLog("[Leader] Metal renderer unavailable, using CoreGraphics: \(error)")
+            Self.writeMetalStatus("FALLBACK to CoreGraphics: \(error)")
         }
+    }
+    // Ground-truth status sink so we can confirm whether Metal actually engaged
+    // (NSLog/unified-log capture is unreliable from a GUI app launched via `open`).
+    private static func writeMetalStatus(_ s: String) {
+        NSLog("[Leader] Metal: \(s)")
+        try? (s + "\n").write(toFile: "/tmp/leader-metal-status.txt", atomically: true, encoding: .utf8)
     }
     // While this is non-past, promote every invalidation to a full repaint. Set
     // after a resize: claude reflows and streams its redraw over the PTY, and

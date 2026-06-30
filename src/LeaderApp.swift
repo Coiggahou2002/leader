@@ -5,11 +5,6 @@ import SwiftUI
 import AppKit
 import Observation
 
-// Bump on every build so the running app self-identifies — lets us confirm at a
-// glance that what's being tested is the freshly built binary, not the production
-// Leader.app or a stale instance.
-let BUILD_TAG = "B16·CoreGfx"
-
 // MARK: - Shared design constants
 enum DS {
     static let gap: CGFloat = 6
@@ -558,14 +553,6 @@ struct ContentView: View {
         }
         .frame(minWidth: 820, minHeight: 480)
         .onAppear { store.start(); focus = .list }
-        // Headless E2E hook: LEADER_AUTOSELECT=1 auto-embeds the first session once
-        // sessions load, so the embed path can be verified without clicking (no focus steal).
-        .onChange(of: store.sessions.count) {
-            guard activeSID == nil,
-                  ProcessInfo.processInfo.environment["LEADER_AUTOSELECT"] == "1",
-                  let first = navList.first else { return }
-            openEmbedded(first)
-        }
         .sheet(item: $renameTarget) { s in
             RenameSheet(session: s, text: $renameText,
                         onSave: { store.setNickname(s, $0); renameTarget = nil },
@@ -637,12 +624,6 @@ struct ContentView: View {
         HStack(spacing: 8) {
             Image(systemName: "terminal").foregroundStyle(.secondary)
             Text(name).font(.callout).bold().lineLimit(1)
-            // live renderer badge: green ⚡Metal if on the GPU path, orange CG otherwise
-            if TerminalManager.shared.isMetal(sid) {
-                Text("⚡Metal").font(.caption2).bold().foregroundStyle(.green)
-            } else {
-                Text("CG").font(.caption2).bold().foregroundStyle(.orange)
-            }
             Text(sid).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
             Spacer(minLength: 8)
             if let s = session {
@@ -666,7 +647,6 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 HStack(spacing: 5) { Text("👨🏻‍💼"); Text("Leader").bold() }.font(.headline)
-                Text(BUILD_TAG).font(.caption2).foregroundStyle(.orange)   // 构建标识,确认在测最新构建
                 if store.loading { ProgressView().controlSize(.small).padding(.leading, 2) }
                 Spacer()
                 Button("新建会话", systemImage: "plus", action: newEmbeddedSession)

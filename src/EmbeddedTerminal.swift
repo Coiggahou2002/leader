@@ -81,54 +81,6 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
     // must NOT be a drag region or left-drag moves the window instead of selecting
     // text. Default is true for non-opaque views, so force it off here.
     override var mouseDownCanMoveWindow: Bool { false }
-    // Switch to SwiftTerm's GPU renderer (CoreText glyph atlas + Metal quads) once
-    // the view is in a window — Metal needs a live view. This replaces the CoreGraphics
-    // per-dirty-row path that left stale cells on alt-screen scroll / resize. Falls
-    // back to CoreGraphics (the default) if Metal is unavailable; never crashes.
-    // DIAGNOSTIC: if /tmp/leader-capture-on exists, tee every byte SwiftTerm receives
-    // to /tmp/leader-pty-capture.raw (+ size to .meta) so it can be replayed into a
-    // headless harness to pinpoint the garbling. File-gated (env via `open` is unreliable).
-    private static let captureHandle: FileHandle? = {
-        guard FileManager.default.fileExists(atPath: "/tmp/leader-capture-on") else { return nil }
-        let p = "/tmp/leader-pty-capture.raw"
-        FileManager.default.createFile(atPath: p, contents: nil)
-        return try? FileHandle(forWritingTo: URL(fileURLWithPath: p))
-    }()
-    override func dataReceived(slice: ArraySlice<UInt8>) {
-        if let h = Self.captureHandle {
-            h.write(Data(slice))
-            try? "\(terminal?.cols ?? 0)x\(terminal?.rows ?? 0)"
-                .write(toFile: "/tmp/leader-pty-capture.meta", atomically: true, encoding: .utf8)
-        }
-        super.dataReceived(slice: slice)
-    }
-    private var metalTried = false
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard window != nil, !metalTried else { return }
-        metalTried = true
-        // Metal renderer is OFF by default: it never fixed the garbling (the real fix is
-        // CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT) and its glyph positioning spreads CJK text
-        // (the buffer is compact but it draws gaps). SwiftTerm's mature CoreGraphics path
-        // renders CJK correctly. Opt in with /tmp/leader-use-metal only for testing.
-        guard FileManager.default.fileExists(atPath: "/tmp/leader-use-metal") else {
-            Self.writeMetalStatus("CoreGraphics (Metal disabled by default)")
-            return
-        }
-        do {
-            try setUseMetal(true)
-            metalBufferingMode = .perFrameAggregated
-            Self.writeMetalStatus("ENABLED (perFrameAggregated), usingMetal=\(isUsingMetalRenderer)")
-        } catch {
-            Self.writeMetalStatus("FALLBACK to CoreGraphics: \(error)")
-        }
-    }
-    // Ground-truth status sink so we can confirm whether Metal actually engaged
-    // (NSLog/unified-log capture is unreliable from a GUI app launched via `open`).
-    private static func writeMetalStatus(_ s: String) {
-        NSLog("[Leader] Metal: \(s)")
-        try? (s + "\n").write(toFile: "/tmp/leader-metal-status.txt", atomically: true, encoding: .utf8)
-    }
     // While this is non-past, promote every invalidation to a full repaint. Set
     // after a resize: claude reflows and streams its redraw over the PTY, and
     // SwiftTerm's partial repaint would otherwise leave the old layout's pixels
@@ -245,9 +197,6 @@ final class TerminalManager: ObservableObject {
         return tv
     }
     func isOpen(_ sid: String) -> Bool { views[sid] != nil }
-    // Live renderer state for the header badge: true if that session's embedded
-    // view is actually on the Metal GPU path.
-    func isMetal(_ sid: String) -> Bool { views[sid]?.isUsingMetalRenderer ?? false }
     func close(_ sid: String) {
         guard let v = views[sid] else { return }
         v.terminate()

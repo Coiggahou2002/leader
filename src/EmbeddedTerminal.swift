@@ -186,7 +186,9 @@ struct TerminalContainer: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let host = NSView()
         host.wantsLayer = true
-        host.layer?.backgroundColor = NSColor.black.cgColor
+        // match the terminal's adaptive background (configureNativeColors) so light
+        // mode doesn't show a black gutter around the terminal during layout.
+        host.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
         return host
     }
     func updateNSView(_ host: NSView, context: Context) {

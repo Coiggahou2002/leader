@@ -1,27 +1,40 @@
 # Leader — a context-switching cockpit for many Claude Code sessions
 
 When you run lots of Claude Code sessions across many folders / git worktrees /
-repos, you lose track of what's open and what needs you. **Leader** is a small
-native macOS panel that lives on the left edge of your screen, always on top,
-and lets you:
+repos, you lose track of what's open and what needs you — and the desktop fills
+with terminal windows. **Leader** is a native macOS **cockpit**: a resizable
+window with a session **sidebar** on the left and an **embedded terminal** on
+the right that runs the actual `claude` session *inside the app*. No more window
+pile. It lets you:
 
 - see every session bucketed into **需处理 / 最近 / 陈旧 / 已归档**
-- **click a session → open or switch to its terminal window** (exact, via kitty)
+- **click a session → it runs embedded** in the main area (`claude --resume`);
+  opened sessions stay alive in the background for instant switching
+- a per-session **close** button kills that embedded process but keeps the list
+  item; an **open in kitty window** button is the escape hatch (e.g. for
+  `/tui fullscreen`, which doesn't scroll cleanly when embedded)
+- an **embed badge** on each row: filled+green while its in-app claude runs,
+  hollow grey once it exits
 - **pin** frequently-used sessions, **archive** ones you're done with,
   **rename** any session (a Leader-only nickname), **search** by title / folder /
   last message, group by folder or sort by recency
-- **+** to start a brand-new session in a chosen folder
+- **+** to start a brand-new session embedded right here — the session id is
+  minted up front (`claude --session-id`), so there's no race to find it
+- the window is normal-level by default; a **pin** toolbar button toggles
+  always-on-top when you want it
 
-It's a thin SwiftUI shell over a few read-only Python scripts. Conversation data
-is never modified — Leader only reads `~/.claude/projects/*` and manages its own
-small state files.
+It's a SwiftUI shell embedding [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)
+over a few read-only Python scripts. Conversation data is never modified — Leader
+only reads `~/.claude/projects/*` and manages its own small state files. The
+embedded `claude` runs with `CLAUDE_CODE_*` / `CODEX_COMPANION_*` stripped from
+its environment, so it persists its own transcript instead of nesting as a child.
 
 ## Requirements
 
 - macOS 14+ (Apple Silicon or Intel — you build it locally)
 - Xcode Command Line Tools (`swiftc`) — `xcode-select --install`
 - [kitty](https://sw.kovidgoyal.net/kitty/) terminal — `brew install --cask kitty`
-  (used for exact window open/switch via its remote-control protocol)
+  (optional now — only the "open in kitty window" escape hatch uses it)
 - Claude Code (`claude` on your `PATH`)
 - Optional: `brew install --cask font-jetbrains-mono`
 

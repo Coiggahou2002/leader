@@ -285,6 +285,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.setFrame(NSRect(x: vf.minX, y: vf.minY, width: width, height: vf.height),
                    display: true, animate: false)
     }
+    // Quitting kills every embedded claude. Confirm if any session is live so a
+    // stray Cmd+Q doesn't tear down running work.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let n = TerminalManager.shared.running.count
+        guard n > 0 else { return .terminateNow }
+        let a = NSAlert()
+        a.messageText = "退出 Leader?"
+        a.informativeText = "还有 \(n) 个嵌入的会话在运行,退出会杀掉它们的进程(transcript 已持久化,可重新 resume)。"
+        a.addButton(withTitle: "退出")
+        a.addButton(withTitle: "取消")
+        a.alertStyle = .warning
+        return a.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
 }
 
 // MARK: - Row

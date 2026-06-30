@@ -72,6 +72,24 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
     // must NOT be a drag region or left-drag moves the window instead of selecting
     // text. Default is true for non-opaque views, so force it off here.
     override var mouseDownCanMoveWindow: Bool { false }
+    // Switch to SwiftTerm's GPU renderer (CoreText glyph atlas + Metal quads) once
+    // the view is in a window — Metal needs a live view. This replaces the CoreGraphics
+    // per-dirty-row path that left stale cells on alt-screen scroll / resize. Falls
+    // back to CoreGraphics (the default) if Metal is unavailable; never crashes.
+    private var metalTried = false
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, !metalTried else { return }
+        metalTried = true
+        do {
+            try setUseMetal(true)
+            // claude's TUI repaints most of the screen each frame.
+            metalBufferingMode = .perFrameAggregated
+            NSLog("[Leader] Metal renderer ENABLED (perFrameAggregated)")
+        } catch {
+            NSLog("[Leader] Metal renderer unavailable, using CoreGraphics: \(error)")
+        }
+    }
     // While this is non-past, promote every invalidation to a full repaint. Set
     // after a resize: claude reflows and streams its redraw over the PTY, and
     // SwiftTerm's partial repaint would otherwise leave the old layout's pixels

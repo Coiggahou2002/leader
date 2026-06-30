@@ -45,6 +45,12 @@ func proxyExport() -> String {
 }
 func resumeCommand(sid: String) -> String {
     let unset = "unset " + POISON.joined(separator: " ")
+    // DEBUG hook: LEADER_TESTCMD runs an arbitrary command (e.g. `vim file`) instead
+    // of resuming claude — used to localize whether garbling is claude-specific or a
+    // general SwiftTerm TUI issue. Remove once the renderer question is settled.
+    if let tc = ProcessInfo.processInfo.environment["LEADER_TESTCMD"], !tc.isEmpty {
+        return "\(unset); \(proxyExport()); \(tc); exec /bin/zsh -i"
+    }
     let fallback = Conf.claudeBin.isEmpty ? "$HOME/.local/bin/claude" : Conf.claudeBin
     return "\(unset); \(proxyExport()); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
          + "\"$CLAUDE\" --dangerously-skip-permissions --resume \(sid); exec /bin/zsh -i"
@@ -140,6 +146,24 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
             }
             return true
         }
+        if term.isCurrentBufferAlternate {
+            // Alt-screen has no scrollback, so scrollUp/Down is a no-op. Translate the
+            // wheel into arrow keys for the app (vim/less/claude TUI), like kitty/wezterm
+            // do when the app hasn't enabled mouse reporting. Encoding respects DECCKM.
+            let app = term.applicationCursor
+            let up: [UInt8]   = app ? [0x1b, 0x4f, 0x41] : [0x1b, 0x5b, 0x41]   // ESC O A / ESC [ A
+            let down: [UInt8] = app ? [0x1b, 0x4f, 0x42] : [0x1b, 0x5b, 0x42]   // ESC O B / ESC [ B
+            scrollAccum += dy
+            let perTick: CGFloat = 12
+            var ticks = 0
+            while abs(scrollAccum) >= perTick && ticks < 8 {
+                let goUp = scrollAccum > 0
+                scrollAccum += goUp ? -perTick : perTick
+                ticks += 1
+                send(goUp ? up : down)
+            }
+            return true
+        }
         let v = max(1, Int(abs(dy) / 12))
         if dy > 0 { scrollUp(lines: v) } else { scrollDown(lines: v) }
         return true
@@ -194,6 +218,9 @@ final class TerminalManager: ObservableObject {
         return tv
     }
     func isOpen(_ sid: String) -> Bool { views[sid] != nil }
+    // Live renderer state for the header badge: true if that session's embedded
+    // view is actually on the Metal GPU path.
+    func isMetal(_ sid: String) -> Bool { views[sid]?.isUsingMetalRenderer ?? false }
     func close(_ sid: String) {
         guard let v = views[sid] else { return }
         v.terminate()

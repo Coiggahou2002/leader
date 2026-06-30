@@ -68,6 +68,10 @@ func applyTermTheme(_ tv: LocalProcessTerminalView) {
 
 final class EmbeddedTerminalView: LocalProcessTerminalView {
     private var scrollAccum: CGFloat = 0
+    // The window is movable-by-background (titlebar is hidden), but the terminal
+    // must NOT be a drag region or left-drag moves the window instead of selecting
+    // text. Default is true for non-opaque views, so force it off here.
+    override var mouseDownCanMoveWindow: Bool { false }
     // Promote any invalidation to a full repaint while the app owns an alt-screen
     // (claude /tui fullscreen) — SwiftTerm's partial repaint leaves stale cells.
     // Normal buffer keeps the efficient incremental path. (Known limitation: even a

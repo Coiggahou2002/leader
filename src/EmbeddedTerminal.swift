@@ -49,11 +49,13 @@ func resumeCommand(sid: String) -> String {
     return "\(unset); \(proxyExport()); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
          + "\"$CLAUDE\" --dangerously-skip-permissions --resume \(sid); exec /bin/zsh -i"
 }
-func newSessionCommand() -> String {
+// New session with a caller-chosen session id, so the app knows the sid up front
+// (no scan race). `claude --session-id <uuid>` starts a fresh conversation at that id.
+func newSessionCommand(sid: String) -> String {
     let unset = "unset " + POISON.joined(separator: " ")
     let fallback = Conf.claudeBin.isEmpty ? "$HOME/.local/bin/claude" : Conf.claudeBin
     return "\(unset); \(proxyExport()); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
-         + "\"$CLAUDE\" --dangerously-skip-permissions; exec /bin/zsh -i"
+         + "\"$CLAUDE\" --dangerously-skip-permissions --session-id \(sid); exec /bin/zsh -i"
 }
 func expandTilde(_ p: String) -> String { (p as NSString).expandingTildeInPath }
 
@@ -129,6 +131,22 @@ final class TerminalManager: ObservableObject {
         delegate.sidByView[ObjectIdentifier(tv)] = sid
         tv.processDelegate = delegate
         tv.startProcess(executable: "/bin/zsh", args: ["-lc", resumeCommand(sid: sid)],
+                        environment: termCleanEnv(), currentDirectory: expandTilde(cwd))
+        views[sid] = tv
+        running.insert(sid); exited.remove(sid)
+        return tv
+    }
+    // Start a brand-new session at a caller-chosen sid (no --resume). If a view for
+    // that sid already exists it's returned as-is, so a later TerminalContainer
+    // lookup reuses it instead of re-spawning with --resume.
+    func newSession(sid: String, cwd: String) -> EmbeddedTerminalView {
+        if let v = views[sid] { return v }
+        let tv = EmbeddedTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        applyTermTheme(tv)
+        delegate.owner = self
+        delegate.sidByView[ObjectIdentifier(tv)] = sid
+        tv.processDelegate = delegate
+        tv.startProcess(executable: "/bin/zsh", args: ["-lc", newSessionCommand(sid: sid)],
                         environment: termCleanEnv(), currentDirectory: expandTilde(cwd))
         views[sid] = tv
         running.insert(sid); exited.remove(sid)

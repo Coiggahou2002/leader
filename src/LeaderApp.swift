@@ -162,7 +162,7 @@ final class Store {
         guard let i = sessions.firstIndex(where: { $0.id == id }) else { return }
         withAnimation(.easeInOut(duration: 0.15)) { change(&sessions[i]) }
     }
-    private func flash(_ m: String) {
+    func flash(_ m: String) {
         toast = m
         Task { try? await Task.sleep(for: .seconds(2)); if toast == m { toast = nil } }
     }
@@ -421,6 +421,9 @@ struct ContentView: View {
     @State private var staleExpanded = false
     @State private var selectedID: String?
     @State private var activeSID: String?            // session embedded in the main area
+    // A just-created session: embedded immediately at a known sid, before the
+    // scanner (every 6s) picks it up into store.sessions.
+    @State private var pendingNew: (sid: String, cwd: String)?
     @FocusState private var focus: Focus?
     @AppStorage("leader.grouped") private var grouped = true
     @Environment(\.colorScheme) private var scheme
@@ -467,6 +470,19 @@ struct ContentView: View {
     private func openEmbedded(_ s: Session) {
         selectedID = s.id
         activeSID = s.id
+    }
+    // "+": start a fresh session embedded right here. We mint the sid so there's no
+    // race to discover it; claude --session-id starts the conversation at that id.
+    private func newEmbeddedSession() {
+        let sid = UUID().uuidString.lowercased()
+        let cwd = Conf.newCwd.isEmpty ? "~" : Conf.newCwd
+        _ = TerminalManager.shared.newSession(sid: sid, cwd: cwd)
+        pendingNew = (sid, cwd)
+        selectedID = sid
+        activeSID = sid
+        store.flash("已新建会话")
+        // pull the new session into the list once its transcript lands
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { store.refresh() }
     }
     private func beginRename(_ s: Session) {
         renameText = s.nickname ?? s.title ?? ""
@@ -564,11 +580,25 @@ struct ContentView: View {
         .overlay(alignment: .bottom) { toast }
     }
 
+    // What to embed for the current activeSID: a scanned session if known, else
+    // the just-created pending one (which has no Session yet).
+    private struct ActiveEmbed { let sid: String; let cwd: String; let name: String; let session: Session? }
+    private var activeEmbed: ActiveEmbed? {
+        guard let id = activeSID else { return nil }
+        if let s = store.sessions.first(where: { $0.id == id }) {
+            return ActiveEmbed(sid: s.full_sid, cwd: s.cwd ?? "~", name: s.name, session: s)
+        }
+        if let p = pendingNew, p.sid == id {
+            return ActiveEmbed(sid: p.sid, cwd: p.cwd, name: "新会话", session: nil)
+        }
+        return nil
+    }
+
     @ViewBuilder private var terminalArea: some View {
-        if let id = activeSID, let s = store.sessions.first(where: { $0.id == id }) {
+        if let info = activeEmbed {
             VStack(spacing: 0) {
-                terminalHeader(s)
-                TerminalContainer(sid: s.full_sid, cwd: s.cwd ?? "~")
+                terminalHeader(sid: info.sid, name: info.name, session: info.session)
+                TerminalContainer(sid: info.sid, cwd: info.cwd)
             }
         } else {
             VStack(spacing: 10) {
@@ -583,17 +613,22 @@ struct ContentView: View {
 
     // Thin bar above the embedded terminal: which session is running + a close
     // button that kills the in-app process but leaves the list item in place.
-    private func terminalHeader(_ s: Session) -> some View {
+    // `session` is nil for a just-created session not yet in the scanned list —
+    // the kitty escape hatch needs a real Session, so it's hidden until then.
+    private func terminalHeader(sid: String, name: String, session: Session?) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "terminal").foregroundStyle(.secondary)
-            Text(s.name).font(.callout).bold().lineLimit(1)
-            Text(s.full_sid).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            Text(name).font(.callout).bold().lineLimit(1)
+            Text(sid).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
             Spacer(minLength: 8)
-            Button("在 kitty 窗口打开", systemImage: "rectangle.on.rectangle") { store.open(s) }
-                .buttonStyle(.plain).labelStyle(.iconOnly).foregroundStyle(.secondary)
-                .help("在独立 kitty 窗口打开(全屏 TUI 滚动用)")
+            if let s = session {
+                Button("在 kitty 窗口打开", systemImage: "rectangle.on.rectangle") { store.open(s) }
+                    .buttonStyle(.plain).labelStyle(.iconOnly).foregroundStyle(.secondary)
+                    .help("在独立 kitty 窗口打开(全屏 TUI 滚动用)")
+            }
             Button("关闭会话终端", systemImage: "xmark.circle.fill") {
-                TerminalManager.shared.close(s.full_sid)
+                TerminalManager.shared.close(sid)
+                if pendingNew?.sid == sid { pendingNew = nil }
                 activeSID = nil
             }
             .buttonStyle(.plain).labelStyle(.iconOnly).foregroundStyle(.secondary)
@@ -609,7 +644,7 @@ struct ContentView: View {
                 HStack(spacing: 5) { Text("👨🏻‍💼"); Text("Leader").bold() }.font(.headline)
                 if store.loading { ProgressView().controlSize(.small).padding(.leading, 2) }
                 Spacer()
-                Button("新建会话", systemImage: "plus", action: { store.newSession(Self.newCwd) })
+                Button("新建会话", systemImage: "plus", action: newEmbeddedSession)
                     .buttonStyle(.plain).labelStyle(.iconOnly)
                     .foregroundStyle(.secondary).help("在 impl 新建一个会话")
                 Button(grouped ? "按文件夹分组" : "按最近使用",

@@ -43,16 +43,19 @@ func proxyExport() -> String {
     guard !p.isEmpty else { return ":" }
     return "export http_proxy=http://\(p) https_proxy=http://\(p) all_proxy=socks5://\(p)"
 }
+// Force claude's full-screen TUI to FULL-REPAINT instead of its cursor-relative
+// differential redraw. The diff renderer rewinds by logical-line count, but a
+// non-grapheme-aware emulator (SwiftTerm) wraps CJK / ZWJ-emoji / exact-width
+// lines into a different physical-row count, so the rewind drifts and the screen
+// garbles on scroll (clean in kitty/ghostty, which wrap the way claude assumes).
+// This claude env var sidesteps the whole class of drift. Must be exported in the
+// shell command because termCleanEnv() strips all CLAUDE_CODE* from the inherited env.
+let fullRepaintExport = "export CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT=1"
+
 func resumeCommand(sid: String) -> String {
     let unset = "unset " + POISON.joined(separator: " ")
-    // DEBUG hook: LEADER_TESTCMD runs an arbitrary command (e.g. `vim file`) instead
-    // of resuming claude — used to localize whether garbling is claude-specific or a
-    // general SwiftTerm TUI issue. Remove once the renderer question is settled.
-    if let tc = ProcessInfo.processInfo.environment["LEADER_TESTCMD"], !tc.isEmpty {
-        return "\(unset); \(proxyExport()); \(tc); exec /bin/zsh -i"
-    }
     let fallback = Conf.claudeBin.isEmpty ? "$HOME/.local/bin/claude" : Conf.claudeBin
-    return "\(unset); \(proxyExport()); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
+    return "\(unset); \(proxyExport()); \(fullRepaintExport); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
          + "\"$CLAUDE\" --dangerously-skip-permissions --resume \(sid); exec /bin/zsh -i"
 }
 // New session with a caller-chosen session id, so the app knows the sid up front
@@ -60,7 +63,7 @@ func resumeCommand(sid: String) -> String {
 func newSessionCommand(sid: String) -> String {
     let unset = "unset " + POISON.joined(separator: " ")
     let fallback = Conf.claudeBin.isEmpty ? "$HOME/.local/bin/claude" : Conf.claudeBin
-    return "\(unset); \(proxyExport()); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
+    return "\(unset); \(proxyExport()); \(fullRepaintExport); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
          + "\"$CLAUDE\" --dangerously-skip-permissions --session-id \(sid); exec /bin/zsh -i"
 }
 func expandTilde(_ p: String) -> String { (p as NSString).expandingTildeInPath }
@@ -82,6 +85,23 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
     // the view is in a window — Metal needs a live view. This replaces the CoreGraphics
     // per-dirty-row path that left stale cells on alt-screen scroll / resize. Falls
     // back to CoreGraphics (the default) if Metal is unavailable; never crashes.
+    // DIAGNOSTIC: if /tmp/leader-capture-on exists, tee every byte SwiftTerm receives
+    // to /tmp/leader-pty-capture.raw (+ size to .meta) so it can be replayed into a
+    // headless harness to pinpoint the garbling. File-gated (env via `open` is unreliable).
+    private static let captureHandle: FileHandle? = {
+        guard FileManager.default.fileExists(atPath: "/tmp/leader-capture-on") else { return nil }
+        let p = "/tmp/leader-pty-capture.raw"
+        FileManager.default.createFile(atPath: p, contents: nil)
+        return try? FileHandle(forWritingTo: URL(fileURLWithPath: p))
+    }()
+    override func dataReceived(slice: ArraySlice<UInt8>) {
+        if let h = Self.captureHandle {
+            h.write(Data(slice))
+            try? "\(terminal?.cols ?? 0)x\(terminal?.rows ?? 0)"
+                .write(toFile: "/tmp/leader-pty-capture.meta", atomically: true, encoding: .utf8)
+        }
+        super.dataReceived(slice: slice)
+    }
     private var metalTried = false
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()

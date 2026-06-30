@@ -107,9 +107,16 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
         super.viewDidMoveToWindow()
         guard window != nil, !metalTried else { return }
         metalTried = true
+        // Metal renderer is OFF by default: it never fixed the garbling (the real fix is
+        // CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT) and its glyph positioning spreads CJK text
+        // (the buffer is compact but it draws gaps). SwiftTerm's mature CoreGraphics path
+        // renders CJK correctly. Opt in with /tmp/leader-use-metal only for testing.
+        guard FileManager.default.fileExists(atPath: "/tmp/leader-use-metal") else {
+            Self.writeMetalStatus("CoreGraphics (Metal disabled by default)")
+            return
+        }
         do {
             try setUseMetal(true)
-            // claude's TUI repaints most of the screen each frame.
             metalBufferingMode = .perFrameAggregated
             Self.writeMetalStatus("ENABLED (perFrameAggregated), usingMetal=\(isUsingMetalRenderer)")
         } catch {

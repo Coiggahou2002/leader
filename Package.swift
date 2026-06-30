@@ -20,6 +20,11 @@ let package = Package(
                 "server.py", "start.sh", "test_switch.py",
             ],
             sources: ["LeaderApp.swift", "EmbeddedTerminal.swift"]
-        )
+        ),
+        .executableTarget(
+            name: "replay",
+            dependencies: ["SwiftTerm"],
+            path: "replay"
+        ),
     ]
 )

@@ -8,7 +8,7 @@ import Observation
 // Bump on every build so the running app self-identifies — lets us confirm at a
 // glance that what's being tested is the freshly built binary, not the production
 // Leader.app or a stale instance.
-let BUILD_TAG = "B15·fullrepaint"
+let BUILD_TAG = "B16·CoreGfx"
 
 // MARK: - Shared design constants
 enum DS {

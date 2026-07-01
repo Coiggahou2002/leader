@@ -21,6 +21,21 @@ enum Conf {
     static var proxy: String { (dict["proxy"] as? String) ?? "" }
     static var claudeBin: String { (dict["claude_bin"] as? String) ?? "" }
     static var newCwd: String { (dict["new_session_cwd"] as? String) ?? "~" }
+    // Terminal appearance. Defaults match the old hard-coded values.
+    static var termFont: String { (dict["term_font"] as? String) ?? "JetBrains Mono" }
+    static var termFontSize: CGFloat {
+        (dict["term_font_size"] as? Double).map { CGFloat($0) } ?? 13
+    }
+    // Common monospaced families, filtered to those actually installed so the
+    // Settings picker never offers a font that won't resolve.
+    static let monoFontChoices: [String] = {
+        let candidates = ["JetBrains Mono", "SF Mono", "SFMono-Regular", "Menlo",
+                          "Monaco", "Fira Code", "Hack", "Source Code Pro",
+                          "IBM Plex Mono", "Cascadia Code", "Cascadia Mono",
+                          "Roboto Mono", "Courier New"]
+        var seen = Set<String>()
+        return candidates.filter { NSFont(name: $0, size: 12) != nil && seen.insert($0).inserted }
+    }()
 
     // Merge updates into the existing config and write it back (pretty-printed so
     // it stays hand-editable). Preserves keys the python backend owns.
@@ -109,9 +124,13 @@ func newSessionCommand(sid: String) -> String {
 func expandTilde(_ p: String) -> String { (p as NSString).expandingTildeInPath }
 
 func applyTermTheme(_ tv: LocalProcessTerminalView) {
-    for name in ["JetBrains Mono", "JetBrainsMono-Regular", "Menlo"] {
-        if let f = NSFont(name: name, size: 13) { tv.font = f; break }
+    let size = Conf.termFontSize
+    // Try the configured font first, then sensible fallbacks, then the system
+    // monospace font so we always end up with *something* monospaced.
+    for name in [Conf.termFont, "JetBrains Mono", "JetBrainsMono-Regular", "Menlo"] {
+        if let f = NSFont(name: name, size: size) { tv.font = f; break }
     }
+    if tv.font.pointSize != size { tv.font = .monospacedSystemFont(ofSize: size, weight: .regular) }
     tv.configureNativeColors()
 }
 
@@ -256,6 +275,10 @@ final class TerminalManager: ObservableObject {
         running.remove(sid); exited.insert(sid)
     }
     var anyOpen: Bool { !views.isEmpty }
+    // Re-apply font/size to every open terminal (called after Settings saves).
+    // SwiftTerm's font setter recomputes cell size and repaints from its own
+    // buffer, so this takes effect without reopening the session.
+    func reapplyTheme() { for v in views.values { applyTermTheme(v) } }
 }
 
 final class TermDelegate: LocalProcessTerminalViewDelegate {

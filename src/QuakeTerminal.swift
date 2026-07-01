@@ -75,6 +75,9 @@ final class QuakeTerminal: NSObject {
         }
     }
 
+    // Re-apply font/size to the scratch terminal if it's alive (Settings save).
+    func reapplyTheme() { if let t = term { applyTermTheme(t) } }
+
     // MARK: show / collapse / close
     func toggle() { visible ? collapse() : show() }
 

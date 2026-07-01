@@ -1113,15 +1113,51 @@ struct SettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var enabled: Bool
     @State private var addr: String
+    @State private var font: String
+    @State private var fontSize: CGFloat
     init() {
         let p = Conf.proxy
         _enabled = State(initialValue: !p.isEmpty)
         _addr = State(initialValue: p.isEmpty ? Conf.detectedEnvProxy() : p)
+        _font = State(initialValue: Conf.termFont)
+        _fontSize = State(initialValue: Conf.termFontSize)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("设置").font(.headline)
+
+            // MARK: terminal appearance
             VStack(alignment: .leading, spacing: 8) {
+                Text("终端外观").font(.subheadline).bold()
+                HStack {
+                    Text("字体").frame(width: 44, alignment: .leading)
+                    Picker("", selection: $font) {
+                        // Keep a stale/custom value selectable so it isn't silently lost.
+                        if !Conf.monoFontChoices.contains(font) { Text(font).tag(font) }
+                        ForEach(Conf.monoFontChoices, id: \.self) { Text($0).tag($0) }
+                    }.labelsHidden()
+                }
+                HStack {
+                    Text("字号").frame(width: 44, alignment: .leading)
+                    Stepper(value: $fontSize, in: 8...32, step: 1) {
+                        Text("\(Int(fontSize)) pt")
+                            .font(.system(.body, design: .monospaced))
+                    }
+                }
+                Text("预览 The quick brown fox · 0123 (){}[]")
+                    .font(.custom(font, size: fontSize))
+                    .lineLimit(1).truncationMode(.tail)
+                    .padding(6).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
+                Text("行距无法调整:终端引擎(SwiftTerm)按字体自身度量决定行高,不提供行距设置。")
+                    .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            // MARK: proxy
+            VStack(alignment: .leading, spacing: 8) {
+                Text("代理").font(.subheadline).bold()
                 Toggle("启用代理", isOn: $enabled)
                 HStack(spacing: 6) {
                     TextField("127.0.0.1:6789", text: $addr)
@@ -1135,7 +1171,7 @@ struct SettingsSheet: View {
                      + "http_proxy / https_proxy / all_proxy。从 Raycast/Dock 启动 App "
                      + "时没有 shell 环境,必须在这里显式设置代理,否则 claude 连不上会让你登录。")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Text("对已经打开的终端不生效,重开该会话即可。")
+                Text("代理改动对已打开的终端不生效,重开该会话即可。")
                     .font(.caption2).foregroundStyle(.tertiary)
             }
             Divider()
@@ -1144,7 +1180,11 @@ struct SettingsSheet: View {
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("保存") {
                     let val = enabled ? addr.trimmingCharacters(in: .whitespaces) : ""
-                    Conf.save(["proxy": val])
+                    Conf.save(["proxy": val,
+                               "term_font": font,
+                               "term_font_size": Double(fontSize)])
+                    TerminalManager.shared.reapplyTheme()   // live terminals update now
+                    QuakeTerminal.shared.reapplyTheme()
                     dismiss()
                 }.keyboardShortcut(.defaultAction)
             }

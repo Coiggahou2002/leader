@@ -10,7 +10,20 @@
 //   - the ✕ button              -> close for real (terminate; next open is fresh,
 //                                   in whatever session is active then)
 import AppKit
+import SwiftUI
 import SwiftTerm
+
+// Invisible probe placed over the right-hand terminal area; QuakeTerminal reads
+// its on-screen rect to drop the scratch panel centered over the terminal (not
+// the whole screen).
+struct TerminalAreaProbe: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { QuakeTerminal.shared.anchorView = v }
+        return v
+    }
+    func updateNSView(_ v: NSView, context: Context) { QuakeTerminal.shared.anchorView = v }
+}
 
 // A borderless panel must opt in to key/main or it can't receive keystrokes.
 final class QuakePanel: NSPanel {
@@ -27,6 +40,10 @@ final class QuakeTerminal: NSObject {
     private var visible = false
     private var lastCtrlPress: TimeInterval = 0
     private static let doubleTapWindow: TimeInterval = 0.4   // seconds
+
+    // The right-hand terminal area, set by TerminalAreaProbe. The panel drops
+    // centered over this, never wider than it.
+    weak var anchorView: NSView?
 
     // ContentView keeps this pointed at the active session's cwd; captured when the
     // shell is (re)created, so a collapsed-and-reopened terminal keeps its dir but a
@@ -63,14 +80,8 @@ final class QuakeTerminal: NSObject {
 
     func show() {
         let p = ensurePanel()
-        guard let scr = (NSApp.keyWindow?.screen ?? NSApp.mainWindow?.screen ?? NSScreen.main) else { return }
-        let vf = scr.visibleFrame
-        let w = min(1000, vf.width * 0.72)
-        let h = min(560, vf.height * 0.5)
-        let x = vf.minX + (vf.width - w) / 2
-        let yShown = vf.maxY - h - 8
-        let yHidden = vf.maxY + 4                    // just above the visible top
-        p.setFrame(NSRect(x: x, y: yHidden, width: w, height: h), display: false)
+        let g = geometry()
+        p.setFrame(g.hidden, display: false)
         p.alphaValue = 0
         NSApp.activate(ignoringOtherApps: true)
         p.makeKeyAndOrderFront(nil)
@@ -78,7 +89,7 @@ final class QuakeTerminal: NSObject {
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.18
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            p.animator().setFrame(NSRect(x: x, y: yShown, width: w, height: h), display: true)
+            p.animator().setFrame(g.shown, display: true)
             p.animator().alphaValue = 1
         }
         p.invalidateShadow()
@@ -88,16 +99,38 @@ final class QuakeTerminal: NSObject {
     // Slide up but keep the process alive (double-Control dismiss).
     func collapse() {
         guard let p = panel else { visible = false; return }
-        let f = p.frame
-        let top = (p.screen ?? NSScreen.main)?.visibleFrame.maxY ?? f.maxY
-        let up = NSRect(x: f.minX, y: top + 4, width: f.width, height: f.height)
+        let g = geometry()
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.16
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
-            p.animator().setFrame(up, display: true)
+            p.animator().setFrame(g.hidden, display: true)
             p.animator().alphaValue = 0
         }, completionHandler: { p.orderOut(nil) })
         visible = false
+    }
+
+    // On-screen rect of the terminal area (or nil if not laid out yet).
+    private func anchorScreenRect() -> NSRect? {
+        guard let v = anchorView, let win = v.window, v.bounds.width > 1 else { return nil }
+        return win.convertToScreen(v.convert(v.bounds, to: nil))
+    }
+
+    // Shown/hidden frames: centered over the terminal area, dropping from its top,
+    // never wider than it. Falls back to the screen if the area isn't available.
+    private func geometry() -> (shown: NSRect, hidden: NSRect) {
+        let m: CGFloat = 8
+        if let a = anchorScreenRect() {
+            let w = max(300, a.width - m * 2)
+            let h = min(a.height - m * 2, max(240, a.height * 0.62))
+            let x = a.minX + (a.width - w) / 2
+            return (NSRect(x: x, y: a.maxY - h - m, width: w, height: h),   // just below top edge
+                    NSRect(x: x, y: a.maxY + 4, width: w, height: h))        // just above top edge
+        }
+        let vf = (NSApp.keyWindow?.screen ?? NSApp.mainWindow?.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let w = min(1000, vf.width * 0.72), h = min(560, vf.height * 0.5)
+        let x = vf.minX + (vf.width - w) / 2
+        return (NSRect(x: x, y: vf.maxY - h - m, width: w, height: h),
+                NSRect(x: x, y: vf.maxY + 4, width: w, height: h))
     }
 
     // Terminate and tear down (✕ button): the next show() spawns a fresh shell in

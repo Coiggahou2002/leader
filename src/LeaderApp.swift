@@ -553,6 +553,7 @@ struct ContentView: View {
                        maxHeight: .infinity)
             terminalArea
                 .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+                .background(TerminalAreaProbe())   // anchors the scratch terminal over this pane
         }
         .frame(minWidth: 820, minHeight: 480)
         .onAppear { store.start(); focus = .list; updateQuakeCwd() }

@@ -310,7 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.backgroundColor = .clear
         w.styleMask.insert(.fullSizeContentView)
         applyLevel()
-        snapLeft()
+        centerWindow()
     }
     func applyLevel() {
         guard let w = window ?? NSApp.windows.first else { return }
@@ -319,12 +319,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.collectionBehavior = AppDelegate.pinned
             ? [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary] : [.managed]
     }
-    func snapLeft() {
+    func centerWindow() {
         guard let w = window, let scr = NSScreen.main else { return }
         let vf = scr.visibleFrame
-        // sidebar + embedded terminal -> a wide window, left-snapped, full height.
-        let width = min(1180, vf.width)
-        w.setFrame(NSRect(x: vf.minX, y: vf.minY, width: width, height: vf.height),
+        // A comfortable centered size (not full-height, not left-snapped).
+        let width = min(1200, vf.width * 0.82)
+        let height = min(820, vf.height * 0.86)
+        let x = vf.minX + (vf.width - width) / 2
+        let y = vf.minY + (vf.height - height) / 2
+        w.setFrame(NSRect(x: x, y: y, width: width, height: height),
                    display: true, animate: false)
     }
     // Quitting kills every embedded claude. Confirm if any session is live so a

@@ -98,6 +98,11 @@ func termCleanEnv() -> [String] {
         out.append("\(k)=\(v)")
     }
     if !out.contains(where: { $0.hasPrefix("TERM=") }) { out.append("TERM=xterm-256color") }
+    // SwiftTerm renders 24-bit color; advertise it so programs (e.g. Claude Code's
+    // diff view) use vivid truecolor backgrounds instead of muted 256-color fallbacks.
+    // Launched from Raycast/Dock, the app inherits no shell env, so COLORTERM would
+    // otherwise be absent.
+    if !out.contains(where: { $0.hasPrefix("COLORTERM=") }) { out.append("COLORTERM=truecolor") }
     out.append("PATH=\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
     return out
 }

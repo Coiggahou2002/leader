@@ -269,6 +269,10 @@ struct MouseLayer: NSViewRepresentable {
     }
 }
 
+extension Notification.Name {
+    static let leaderCloseActive = Notification.Name("leaderCloseActive")
+}
+
 // MARK: - 窗口配置 + 置顶
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static var pinned = false   // window stays normal level; opt-in via the pin toolbar button
@@ -276,10 +280,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         installScrollMonitor()                       // wheel -> embedded terminal
         QuakeTerminal.shared.installHotkey()          // double-tap Control -> scratch terminal
+        installCloseMonitor()                         // Cmd+W -> confirm & close active session (not the app)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.configure() }
         NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.applyLevel() }
+    }
+    // Cmd+W must not close the window/quit the app; repurpose it to "close the
+    // active session" (with confirm, handled in ContentView). Swallow the event
+    // so the default File→Close never fires. Cmd+Q still quits (its own confirm).
+    func installCloseMonitor() {
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            if e.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command],
+               e.charactersIgnoringModifiers?.lowercased() == "w" {
+                NotificationCenter.default.post(name: .leaderCloseActive, object: nil)
+                return nil
+            }
+            return e
+        }
     }
     func configure() {
         guard let w = NSApp.windows.first else { return }
@@ -460,6 +478,7 @@ struct ContentView: View {
     @State private var showOpenPath = false          // Cmd+Shift+O quick-open
     @State private var pathInput = ""
     @State private var pathSel = 0
+    @State private var confirmCloseActive = false    // Cmd+W confirm
     // A just-created session: embedded immediately at a known sid, before the
     // scanner (every 6s) picks it up into store.sessions.
     @State private var pendingNew: (sid: String, cwd: String)?
@@ -642,6 +661,23 @@ struct ContentView: View {
                         onCancel: { renameTarget = nil })
         }
         .sheet(isPresented: $showSettings) { SettingsSheet() }
+        .onReceive(NotificationCenter.default.publisher(for: .leaderCloseActive)) { _ in
+            if activeEmbed != nil { confirmCloseActive = true }   // ignore when nothing is open
+        }
+        .confirmationDialog("关闭当前会话?", isPresented: $confirmCloseActive, titleVisibility: .visible) {
+            Button("关闭会话", role: .destructive) { closeActiveSession() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("会杀掉「\(activeEmbed?.name ?? "")」的嵌入进程(transcript 已保存,可重新打开)。Leader 不会退出。")
+        }
+    }
+
+    // Cmd+W: close only the embedded session shown in the main area.
+    private func closeActiveSession() {
+        guard let sid = activeEmbed?.sid else { return }
+        TerminalManager.shared.close(sid)
+        if pendingNew?.sid == sid { pendingNew = nil }
+        activeSID = nil
     }
 
     // The scratch (quake) terminal opens in the active session's working dir; keep

@@ -16,6 +16,15 @@ enum DS {
     static let pinZone: CGFloat = 30       // next hit-zone: pin/unpin
 }
 
+// Flat, opaque sidebar fill (Codex-style). Solid so it reads uniform all the way
+// to the top edge under the transparent titlebar — a VisualEffect material renders
+// a darker band where the titlebar overlaps it.
+let sidebarBGColor = NSColor(name: nil) { app in
+    app.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        ? NSColor(calibratedWhite: 0.145, alpha: 1)   // ~#252525
+        : NSColor(calibratedWhite: 0.96, alpha: 1)
+}
+
 // Neutral hover/press highlight for sidebar nav rows (no accent tint).
 struct HoverRowStyle: ButtonStyle {
     @State private var hover = false
@@ -603,7 +612,7 @@ struct ContentView: View {
             Divider().opacity(0.4)
             bottomBar
         }
-        .background(VisualEffect().ignoresSafeArea())
+        .background(Color(nsColor: sidebarBGColor).ignoresSafeArea())
         .background {                                   // Cmd+F -> focus search
             Button("") { focus = .search }
                 .keyboardShortcut("f", modifiers: .command).opacity(0)

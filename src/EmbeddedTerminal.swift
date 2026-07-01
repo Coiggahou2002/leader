@@ -168,10 +168,20 @@ func applyTermTheme(_ tv: LocalProcessTerminalView) {
         if let f = NSFont(name: name, size: size) { tv.font = f; break }
     }
     if tv.font.pointSize != size { tv.font = .monospacedSystemFont(ofSize: size, weight: .regular) }
-    tv.configureNativeColors()
-    // Soft (Kaku) 16-color palette vs SwiftTerm's default — the actual fix for
-    // "harsh" indexed colors. installColors needs exactly 16 or it no-ops.
-    tv.installColors(Conf.softColors ? kakuAnsiPalette : defaultAnsiPalette)
+    tv.configureNativeColors()   // adaptive default (used when soft colors are off)
+    // Soft (Kaku Dark) theme: the muted ANSI palette was tuned for Kaku's #15141b
+    // background, so on SwiftTerm's default background it looks off. Apply the
+    // whole thing together — 16-color palette + bg/fg/cursor. installColors needs
+    // exactly 16 or it no-ops.
+    if Conf.softColors {
+        tv.installColors(kakuAnsiPalette)
+        let t = tv.getTerminal()
+        tv.setBackgroundColor(source: t, color: hexColor(0x15141b))                       // Kaku Dark bg
+        tv.setForegroundColor(source: t, color: hexColor(0xd5d4d6))                       // Kaku Dark fg
+        tv.setCursorColor(source: t, color: hexColor(0x8e6ad9), textColor: hexColor(0x15141b))  // purple caret
+    } else {
+        tv.installColors(defaultAnsiPalette)
+    }
 }
 
 final class EmbeddedTerminalView: LocalProcessTerminalView {

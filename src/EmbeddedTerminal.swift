@@ -346,6 +346,18 @@ final class TermDelegate: LocalProcessTerminalViewDelegate {
 
 // Hosts the selected session's terminal; reparents the one visible terminal so
 // all opened sessions stay alive in the background for instant switching.
+// Inner padding around the embedded terminal (Kaku-style breathing room; the
+// gutter is painted the same color as the terminal background so it reads as one
+// surface, not a border).
+let terminalInnerPadding: CGFloat = 10
+
+// The color the host gutter is painted so it matches the terminal background:
+// Kaku Dark's #15141b when soft colors are on, otherwise the adaptive default.
+func terminalHostBGColor() -> NSColor {
+    Conf.softColors ? NSColor(srgbRed: 0x15/255, green: 0x14/255, blue: 0x1b/255, alpha: 1)
+                    : .textBackgroundColor
+}
+
 struct TerminalContainer: NSViewRepresentable {
     let sid: String
     let cwd: String
@@ -353,23 +365,23 @@ struct TerminalContainer: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let host = NSView()
         host.wantsLayer = true
-        // match the terminal's adaptive background (configureNativeColors) so light
-        // mode doesn't show a black gutter around the terminal during layout.
-        host.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        host.layer?.backgroundColor = terminalHostBGColor().cgColor
         return host
     }
     func updateNSView(_ host: NSView, context: Context) {
+        host.layer?.backgroundColor = terminalHostBGColor().cgColor   // keep gutter matching after a theme toggle
         let term = mgr.terminal(forSid: sid, cwd: cwd)
         for sub in host.subviews where sub !== term { sub.removeFromSuperview() }
         if term.superview !== host {
             term.removeFromSuperview()
             term.translatesAutoresizingMaskIntoConstraints = false
             host.addSubview(term)
+            let p = terminalInnerPadding
             NSLayoutConstraint.activate([
-                term.topAnchor.constraint(equalTo: host.topAnchor),
-                term.bottomAnchor.constraint(equalTo: host.bottomAnchor),
-                term.leadingAnchor.constraint(equalTo: host.leadingAnchor),
-                term.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+                term.topAnchor.constraint(equalTo: host.topAnchor, constant: p),
+                term.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -p),
+                term.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: p),
+                term.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -p),
             ])
         }
         DispatchQueue.main.async { host.window?.makeFirstResponder(term) }

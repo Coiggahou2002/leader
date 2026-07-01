@@ -16,6 +16,18 @@ enum DS {
     static let pinZone: CGFloat = 30       // next hit-zone: pin/unpin
 }
 
+// Neutral hover/press highlight for sidebar nav rows (no accent tint).
+struct HoverRowStyle: ButtonStyle {
+    @State private var hover = false
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(RoundedRectangle(cornerRadius: DS.corner)
+                .fill(hover ? AnyShapeStyle(Color.primary.opacity(0.08)) : AnyShapeStyle(.clear)))
+            .opacity(configuration.isPressed ? 0.6 : 1)
+            .onHover { hover = $0 }
+    }
+}
+
 // MARK: - Model
 struct Session: Decodable, Identifiable {
     let full_sid: String
@@ -364,10 +376,8 @@ struct Row: View {
         .padding(.vertical, DS.rowPadV).padding(.horizontal, DS.rowPadH)
         .frame(minHeight: 36)
         .background(RoundedRectangle(cornerRadius: DS.corner)
-            .fill(selected ? AnyShapeStyle(Color.accentColor.opacity(0.25))
-                           : (hover ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))))
-        .overlay(RoundedRectangle(cornerRadius: DS.corner)
-            .strokeBorder(Color.accentColor.opacity(selected ? 0.7 : 0), lineWidth: 1))
+            .fill(selected ? AnyShapeStyle(Color.primary.opacity(0.14))
+                           : (hover ? AnyShapeStyle(Color.primary.opacity(0.06)) : AnyShapeStyle(.clear))))
         .contentShape(RoundedRectangle(cornerRadius: DS.corner))
         .overlay { MouseLayer(onClick: onOpen, onArchive: onArchive, onPin: onPin,
                               onRename: onRename, hasPinZone: showPin, onHover: { inside in
@@ -579,15 +589,18 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            header
+            trafficInset                                 // 红绿灯落在这块留白里
+            topNav
+            searchBar
             Picker("视图", selection: $mode) {
                 ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented).labelsHidden()
             .padding(.horizontal, DS.rowPadH).padding(.bottom, 6)
-            searchBar
-            Divider().opacity(0.5)
+            Divider().opacity(0.4)
             list
+            Divider().opacity(0.4)
+            bottomBar
         }
         .background(VisualEffect().ignoresSafeArea())
         .background {                                   // Cmd+F -> focus search
@@ -663,36 +676,51 @@ struct ContentView: View {
         .background(.bar)
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                HStack(spacing: 5) { Text("👨🏻‍💼"); Text("Leader").bold() }.font(.headline)
-                if store.loading { ProgressView().controlSize(.small).padding(.leading, 2) }
-                Spacer()
-                Button("新建会话", systemImage: "plus", action: newEmbeddedSession)
-                    .buttonStyle(.plain).labelStyle(.iconOnly)
-                    .foregroundStyle(.secondary).help("在 impl 新建一个会话")
-                Button(grouped ? "按文件夹分组" : "按最近使用",
-                       systemImage: grouped ? "folder.fill" : "clock",
-                       action: { grouped.toggle() })
-                    .buttonStyle(.plain).labelStyle(.iconOnly)
-                    .foregroundStyle(grouped ? Color.accentColor : .secondary)
-                    .help(grouped ? "当前:按文件夹分组(点切换为最近使用)"
-                                  : "当前:按最近使用 LRU(点切换为分组)")
-                Button("置顶", systemImage: pinned ? "pin.fill" : "pin", action: togglePin)
-                    .buttonStyle(.plain).labelStyle(.iconOnly)
-                    .foregroundStyle(pinned ? Color.accentColor : .secondary).help("窗口置顶")
-                Button("设置", systemImage: "gearshape", action: { showSettings = true })
-                    .buttonStyle(.plain).labelStyle(.iconOnly)
-                    .foregroundStyle(.secondary).help("设置(代理等)")
-                Button("刷新", systemImage: "arrow.clockwise", action: store.refresh)
-                    .buttonStyle(.plain).labelStyle(.iconOnly)
-                    .foregroundStyle(.secondary).help("刷新")
+    // Empty strip reserving room for the window's traffic lights (which sit at the
+    // sidebar's top-left, Codex-style). Draggable as a titlebar substitute.
+    private var trafficInset: some View {
+        Color.clear.frame(height: 30)
+    }
+
+    // Codex-style top nav rows (icon + label + hover highlight).
+    private var topNav: some View {
+        navRow("square.and.pencil", "新建会话", action: newEmbeddedSession)
+            .padding(.horizontal, DS.gap).padding(.top, 2).padding(.bottom, 4)
+    }
+    private func navRow(_ icon: String, _ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon).font(.system(size: 13)).frame(width: 16)
+                Text(title).font(.callout)
+                Spacer(minLength: 0)
             }
-            Text("\(attention.count) 需处理 · \(staleList.count) 陈旧 · \(archivedList.count) 已归档")
-                .font(.caption).foregroundStyle(.tertiary)
+            .padding(.vertical, 7).padding(.horizontal, DS.rowPadH - 2)
+            .contentShape(RoundedRectangle(cornerRadius: DS.corner))
         }
-        .padding(.horizontal, DS.rowPadH).padding(.top, 12).padding(.bottom, 8)
+        .buttonStyle(HoverRowStyle())
+    }
+
+    // Utility strip pinned to the sidebar bottom (Codex puts the account row here).
+    private var bottomBar: some View {
+        HStack(spacing: 10) {
+            if store.loading { ProgressView().controlSize(.small) }
+            Text("\(attention.count) 待处理 · \(archivedList.count) 归档")
+                .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            Spacer(minLength: 4)
+            iconButton("arrow.clockwise", "刷新", Color.secondary, action: store.refresh)
+            iconButton(grouped ? "folder.fill" : "clock",
+                       grouped ? "按文件夹分组(点切最近使用)" : "按最近使用(点切分组)",
+                       grouped ? Color.accentColor : Color.secondary) { grouped.toggle() }
+            iconButton("gearshape", "设置(代理等)", Color.secondary) { showSettings = true }
+            iconButton(pinned ? "pin.fill" : "pin", "窗口置顶",
+                       pinned ? Color.accentColor : Color.secondary, action: togglePin)
+        }
+        .padding(.horizontal, DS.rowPadH).padding(.vertical, 8)
+    }
+    private func iconButton(_ sym: String, _ help: String, _ color: Color,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: sym).font(.callout) }
+            .buttonStyle(.plain).foregroundStyle(color).help(help)
     }
 
     private var searchBar: some View {

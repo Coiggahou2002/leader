@@ -7,18 +7,58 @@ import AppKit
 import SwiftUI
 import SwiftTerm
 
-// Machine-specific settings, mirroring config.py defaults. Read once at launch
-// from ~/.config/leader/config.json (the proxy/claude_bin the python backend uses).
+// Machine-specific settings, mirroring config.py defaults, in the SAME file the
+// python backend reads (~/.config/leader/config.json). Read FRESH on each access
+// so the Settings panel's writes take effect for the next terminal launch without
+// an app restart (the file is tiny; this is not a hot path).
 enum Conf {
-    static let dict: [String: Any] = {
-        let p = NSString(string: "~/.config/leader/config.json").expandingTildeInPath
-        if let d = try? Data(contentsOf: URL(fileURLWithPath: p)),
+    static let path = NSString(string: "~/.config/leader/config.json").expandingTildeInPath
+    static var dict: [String: Any] {
+        if let d = try? Data(contentsOf: URL(fileURLWithPath: path)),
            let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] { return o }
         return [:]
-    }()
+    }
     static var proxy: String { (dict["proxy"] as? String) ?? "" }
     static var claudeBin: String { (dict["claude_bin"] as? String) ?? "" }
     static var newCwd: String { (dict["new_session_cwd"] as? String) ?? "~" }
+
+    // Merge updates into the existing config and write it back (pretty-printed so
+    // it stays hand-editable). Preserves keys the python backend owns.
+    static func save(_ updates: [String: Any]) {
+        var m = dict
+        for (k, v) in updates { m[k] = v }
+        let url = URL(fileURLWithPath: path)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(
+            withJSONObject: m, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: url)
+        }
+    }
+    // Best-effort "host:port" from the current shell's proxy env, so the Settings
+    // panel can prefill instead of making the user retype it.
+    static func detectedEnvProxy() -> String {
+        let env = ProcessInfo.processInfo.environment
+        for k in ["https_proxy", "http_proxy", "HTTPS_PROXY", "HTTP_PROXY",
+                  "all_proxy", "ALL_PROXY"] {
+            guard var v = env[k], !v.isEmpty else { continue }
+            for pre in ["http://", "https://", "socks5://", "socks5h://"] where v.hasPrefix(pre) {
+                v = String(v.dropFirst(pre.count))
+            }
+            return v.hasSuffix("/") ? String(v.dropLast()) : v
+        }
+        return ""
+    }
+}
+
+// Proxy env entries (or []) shared by any plain shell we spawn (e.g. the quake
+// terminal). claude terminals inject the same vars via proxyExport() in their
+// launch command; this is the array-form for processes started without a shell
+// snippet.
+func proxyEnvEntries() -> [String] {
+    let p = Conf.proxy
+    guard !p.isEmpty else { return [] }
+    return ["http_proxy=http://\(p)", "https_proxy=http://\(p)", "all_proxy=socks5://\(p)"]
 }
 
 // CRITICAL: a `claude` launched with CLAUDE_CODE_*/CODEX_COMPANION_* in its env

@@ -254,6 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow?
     func applicationDidFinishLaunching(_ n: Notification) {
         installScrollMonitor()                       // wheel -> embedded terminal
+        QuakeTerminal.shared.installHotkey()          // double-tap Control -> scratch terminal
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.configure() }
         NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
@@ -435,6 +436,7 @@ struct ContentView: View {
     @State private var staleExpanded = false
     @State private var selectedID: String?
     @State private var activeSID: String?            // session embedded in the main area
+    @State private var showSettings = false
     // A just-created session: embedded immediately at a known sid, before the
     // scanner (every 6s) picks it up into store.sessions.
     @State private var pendingNew: (sid: String, cwd: String)?
@@ -553,11 +555,24 @@ struct ContentView: View {
                 .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 820, minHeight: 480)
-        .onAppear { store.start(); focus = .list }
+        .onAppear { store.start(); focus = .list; updateQuakeCwd() }
+        .onChange(of: activeSID) { _, _ in updateQuakeCwd() }
         .sheet(item: $renameTarget) { s in
             RenameSheet(session: s, text: $renameText,
                         onSave: { store.setNickname(s, $0); renameTarget = nil },
                         onCancel: { renameTarget = nil })
+        }
+        .sheet(isPresented: $showSettings) { SettingsSheet() }
+    }
+
+    // The scratch (quake) terminal opens in the active session's working dir; keep
+    // it pointed there. Uses the last-seen cwd (where the work is), not the resume
+    // root, since a scratch shell is most useful next to the actual work.
+    private func updateQuakeCwd() {
+        if let id = activeSID, let s = store.sessions.first(where: { $0.id == id }) {
+            QuakeTerminal.shared.currentCwd = s.cwd ?? s.resume_cwd ?? NSHomeDirectory()
+        } else if let p = pendingNew {
+            QuakeTerminal.shared.currentCwd = expandTilde(p.cwd)
         }
     }
 
@@ -666,6 +681,9 @@ struct ContentView: View {
                 Button("置顶", systemImage: pinned ? "pin.fill" : "pin", action: togglePin)
                     .buttonStyle(.plain).labelStyle(.iconOnly)
                     .foregroundStyle(pinned ? Color.accentColor : .secondary).help("窗口置顶")
+                Button("设置", systemImage: "gearshape", action: { showSettings = true })
+                    .buttonStyle(.plain).labelStyle(.iconOnly)
+                    .foregroundStyle(.secondary).help("设置(代理等)")
                 Button("刷新", systemImage: "arrow.clockwise", action: store.refresh)
                     .buttonStyle(.plain).labelStyle(.iconOnly)
                     .foregroundStyle(.secondary).help("刷新")
@@ -831,6 +849,51 @@ struct RenameSheet: View {
         }
         .padding(16).frame(width: 320)
         .onAppear { DispatchQueue.main.async { focused = true } }
+    }
+}
+
+// MARK: - 设置面板(代理)
+struct SettingsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var enabled: Bool
+    @State private var addr: String
+    init() {
+        let p = Conf.proxy
+        _enabled = State(initialValue: !p.isEmpty)
+        _addr = State(initialValue: p.isEmpty ? Conf.detectedEnvProxy() : p)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("设置").font(.headline)
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("启用代理", isOn: $enabled)
+                HStack(spacing: 6) {
+                    TextField("127.0.0.1:6789", text: $addr)
+                        .textFieldStyle(.roundedBorder).disabled(!enabled)
+                    Button("检测环境") {
+                        let d = Conf.detectedEnvProxy()
+                        if !d.isEmpty { addr = d; enabled = true }
+                    }.help("从当前 shell 的 http_proxy / https_proxy 读取")
+                }
+                Text("填 host:port(不带 http://)。启用后,每个新终端启动时会注入 "
+                     + "http_proxy / https_proxy / all_proxy。从 Raycast/Dock 启动 App "
+                     + "时没有 shell 环境,必须在这里显式设置代理,否则 claude 连不上会让你登录。")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text("对已经打开的终端不生效,重开该会话即可。")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存") {
+                    let val = enabled ? addr.trimmingCharacters(in: .whitespaces) : ""
+                    Conf.save(["proxy": val])
+                    dismiss()
+                }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18).frame(width: 400)
     }
 }
 

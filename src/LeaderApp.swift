@@ -304,6 +304,7 @@ struct MouseLayer: NSViewRepresentable {
 
 extension Notification.Name {
     static let leaderCloseActive = Notification.Name("leaderCloseActive")
+    static let leaderFocusSearch = Notification.Name("leaderFocusSearch")
 }
 
 // MARK: - 窗口配置 + 置顶
@@ -329,7 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         installScrollMonitor()                       // wheel -> embedded terminal
         QuakeTerminal.shared.installHotkey()          // double-tap Control -> scratch terminal
-        installCloseMonitor()                         // Cmd+W -> confirm & close active session (not the app)
+        installKeyMonitor()                           // Cmd+W -> close active session; Cmd+F -> focus search
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.configure() }
         NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
@@ -338,14 +339,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Cmd+W must not close the window/quit the app; repurpose it to "close the
     // active session" (with confirm, handled in ContentView). Swallow the event
     // so the default File→Close never fires. Cmd+Q still quits (its own confirm).
-    func installCloseMonitor() {
+    func installKeyMonitor() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
-            if e.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command],
-               e.charactersIgnoringModifiers?.lowercased() == "w" {
+            // Only plain Cmd (no other modifiers), else let chords through.
+            guard e.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command]
+            else { return e }
+            switch e.charactersIgnoringModifiers?.lowercased() {
+            case "w":
                 NotificationCenter.default.post(name: .leaderCloseActive, object: nil)
+                return nil                            // swallow so File→Close never fires
+            case "f":
+                // Focus the sidebar search even when a terminal has key focus (it
+                // would otherwise swallow Cmd+F). Swallow so it doesn't reach the shell.
+                NotificationCenter.default.post(name: .leaderFocusSearch, object: nil)
                 return nil
+            default:
+                return e
             }
-            return e
         }
     }
     func configure() {
@@ -716,6 +726,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .leaderCloseActive)) { _ in
             if activeEmbed != nil { confirmCloseActive = true }   // ignore when nothing is open
         }
+        .onReceive(NotificationCenter.default.publisher(for: .leaderFocusSearch)) { _ in
+            focus = .search
+        }
         .confirmationDialog("关闭当前会话?", isPresented: $confirmCloseActive, titleVisibility: .visible) {
             Button("关闭会话", role: .destructive) { closeActiveSession() }
             Button("取消", role: .cancel) {}
@@ -746,7 +759,6 @@ struct ContentView: View {
     private var sidebar: some View {
         VStack(spacing: 0) {
             trafficInset                                 // 红绿灯落在这块留白里
-            topNav
             searchBar
             Picker("视图", selection: $mode) {
                 ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
@@ -760,9 +772,7 @@ struct ContentView: View {
         }
         .background(VisualEffect().ignoresSafeArea())   // frosted translucent sidebar (Codex-like)
         .background {                                   // hidden keyboard shortcuts
-            ZStack {
-                Button("") { focus = .search }
-                    .keyboardShortcut("f", modifiers: .command)
+            ZStack {                                     // Cmd+F is handled by the app-wide key monitor
                 Button("") { promptOpenPath() }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
             }.opacity(0)
@@ -902,24 +912,6 @@ struct ContentView: View {
     // sidebar's top-left, Codex-style). Draggable as a titlebar substitute.
     private var trafficInset: some View {
         Color.clear.frame(height: 30)
-    }
-
-    // Codex-style top nav rows (icon + label + hover highlight).
-    private var topNav: some View {
-        navRow("square.and.pencil", "新建会话", action: newEmbeddedSession)
-            .padding(.horizontal, DS.gap).padding(.top, 2).padding(.bottom, 4)
-    }
-    private func navRow(_ icon: String, _ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon).font(.system(size: 13)).frame(width: 16)
-                Text(title).font(.callout)
-                Spacer(minLength: 0)
-            }
-            .padding(.vertical, 7).padding(.horizontal, DS.rowPadH - 2)
-            .contentShape(RoundedRectangle(cornerRadius: DS.corner))
-        }
-        .buttonStyle(HoverRowStyle())
     }
 
     // Utility strip pinned to the sidebar bottom (Codex puts the account row here).

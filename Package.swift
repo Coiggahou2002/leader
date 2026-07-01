@@ -5,10 +5,17 @@ let package = Package(
     name: "Leader",
     platforms: [.macOS(.v14)],
     dependencies: [
-        // Fork of SwiftTerm adding lineHeightMultiplier (adjustable terminal line
-        // spacing; upstream has no such option). Branch leader-line-height off 1.13.0.
+        // Fork of SwiftTerm adding lineHeightMultiplier for adjustable terminal line
+        // spacing, with glyphs vertically centered in the taller cell.
+        //
+        // TODO: upstream main already has an (unreleased) `lineSpacing` — but it does
+        // NOT center the glyph (extra space piles above the text). We opened
+        // migueldeicaza/SwiftTerm#585 to add that centering. Once #585 is merged AND
+        // upstream ships a tagged release that includes `lineSpacing`, drop this fork:
+        // point back at the upstream tag and rename `tv.lineHeightMultiplier` ->
+        // `tv.lineSpacing` in EmbeddedTerminal.swift (applyTermTheme).
         .package(url: "https://github.com/Coiggahou2002/SwiftTerm.git",
-                 revision: "8d3bd3b7325e3faa623a82aee52b481176dbded9")
+                 revision: "d59975b82d12d3a1e2d4f624a78c3621a4e33b35")
     ],
     targets: [
         .executableTarget(

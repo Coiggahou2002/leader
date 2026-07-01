@@ -620,6 +620,7 @@ struct ContentView: View {
                 .keyboardShortcut("f", modifiers: .command).opacity(0)
         }
         .focusable()
+        .focusEffectDisabled()                          // no blue focus ring around the sidebar
         .focused($focus, equals: .list)
         .onKeyPress(.upArrow) { moveSelection(-1); return .handled }
         .onKeyPress(.downArrow) { moveSelection(1); return .handled }
@@ -943,6 +944,7 @@ struct LeaderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     var body: some Scene {
         WindowGroup { ContentView() }
+            .windowStyle(.hiddenTitleBar)              // traffic lights float over content; no titlebar band
             .windowResizability(.contentMinSize)
     }
 }

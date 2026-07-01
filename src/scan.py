@@ -138,12 +138,32 @@ def _ts(s: str) -> float:
     except Exception:
         return 0.0
 
+def _encode(p: str) -> str:
+    """claude's project-folder encoding: every non-alphanumeric -> '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", p)
+
+def _resume_dir(path: str, cwds: list[str]) -> str | None:
+    """Directory `claude --resume <sid>` MUST run from: the one whose encoding
+    matches the transcript's parent folder (that folder is fixed at session
+    START cwd; the session may `cd` elsewhere later, so the last-seen cwd is
+    often wrong). The folder name is lossy (/, _, ., - all collapse to '-') so
+    it can't be decoded — instead forward-encode each recorded cwd and match."""
+    folder = os.path.basename(os.path.dirname(path))
+    matches = [c for c in cwds if _encode(c) == folder]
+    for c in matches:                       # prefer one that still exists
+        if os.path.isdir(c):
+            return c
+    if matches:
+        return matches[0]
+    return cwds[0] if cwds else None
+
 def digest(path: str) -> dict:
     st = os.stat(path)
     d = {"file": path, "sid": os.path.basename(path)[:8], "idle_h": None,
-         "title": None, "last_prompt": None, "cwd": None, "branch": None,
-         "msgs": 0, "out_tok": 0, "last_role": None, "last_stop": None,
-         "bad_tail": False, "asks": False}
+         "title": None, "last_prompt": None, "cwd": None, "resume_cwd": None,
+         "branch": None, "msgs": 0, "out_tok": 0, "last_role": None,
+         "last_stop": None, "bad_tail": False, "asks": False}
+    cwds_seen: list[str] = []   # ordered-unique cwds, to pick the resume dir
     # last activity = newest in-transcript message timestamp, NOT file mtime
     # (a background indexer rewrites these files and pollutes mtime).
     last_ts = 0.0
@@ -176,6 +196,8 @@ def digest(path: str) -> dict:
             last_msg_role = t
             if e.get("cwd"):
                 d["cwd"] = e["cwd"]
+                if e["cwd"] not in cwds_seen:
+                    cwds_seen.append(e["cwd"])
             if e.get("gitBranch"):
                 d["branch"] = e["gitBranch"]
             if e.get("timestamp"):
@@ -192,6 +214,7 @@ def digest(path: str) -> dict:
                     last_assistant_text = txt
     d["last_role"] = last_msg_role
     d["last_stop"] = last_assistant_stop
+    d["resume_cwd"] = _resume_dir(path, cwds_seen) or d["cwd"]
     d["idle_h"] = (NOW - last_ts) / 3600 if last_ts else (NOW - st.st_mtime) / 3600
     # only the tail of the last assistant turn matters for these signals
     d["asks"] = bool(ASK.search(last_assistant_text[-300:]))

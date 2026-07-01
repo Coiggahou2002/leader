@@ -23,6 +23,7 @@ struct Session: Decodable, Identifiable {
     let title: String?
     let last_prompt: String?
     let cwd: String?
+    let resume_cwd: String?   // dir `claude --resume` must run from (scan.py)
     let branch: String?
     let bucket: String
     let why: [String]
@@ -80,7 +81,7 @@ enum Backend {
     }
     @discardableResult
     static func open(_ s: Session) -> Bool {
-        let d = run(["\(dir)/launch.py", s.full_sid, s.cwd ?? ""])
+        let d = run(["\(dir)/launch.py", s.full_sid, s.resume_cwd ?? s.cwd ?? ""])
         let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
         return (o?["ok"] as? Bool) ?? false
     }
@@ -591,7 +592,10 @@ struct ContentView: View {
     private var activeEmbed: ActiveEmbed? {
         guard let id = activeSID else { return nil }
         if let s = store.sessions.first(where: { $0.id == id }) {
-            return ActiveEmbed(sid: s.full_sid, cwd: s.cwd ?? "~", name: s.name, session: s)
+            // resume_cwd is the dir claude can actually --resume from; s.cwd is
+            // the last-seen (possibly cd'd-into) dir, only good for display.
+            return ActiveEmbed(sid: s.full_sid, cwd: s.resume_cwd ?? s.cwd ?? "~",
+                               name: s.name, session: s)
         }
         if let p = pendingNew, p.sid == id {
             return ActiveEmbed(sid: p.sid, cwd: p.cwd, name: "新会话", session: nil)

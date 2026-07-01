@@ -202,7 +202,23 @@ struct VisualEffect: NSViewRepresentable {
     func updateNSView(_ v: NSVisualEffectView, context: Context) {}
 }
 
-// MARK: - 滚动条暗色适配:强制 overlay 细滚动条 + 跟随明暗
+// Low-contrast overlay scrollbar knob (Codex-like). The system .light knob on a
+// dark UI is glaringly bright; draw a subtle rounded knob and no track instead.
+final class SubtleScroller: NSScroller {
+    var isDark = true
+    override class var isCompatibleWithOverlayScrollers: Bool { true }
+    override func drawKnobSlot(in slot: NSRect, highlight: Bool) { /* no track */ }
+    override func drawKnob() {
+        let r = rect(for: .knob).insetBy(dx: 3, dy: 3)
+        guard r.width > 1, r.height > 1 else { return }
+        let a: CGFloat = isDark ? 0.22 : 0.24
+        (isDark ? NSColor.white : NSColor.black).withAlphaComponent(a).setFill()
+        let radius = min(r.width, r.height) / 2
+        NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
+    }
+}
+
+// MARK: - 滚动条暗色适配:overlay 细滚动条 + 低对比 knob(参考 Codex)
 struct ScrollerFix: NSViewRepresentable {
     var dark: Bool
     func makeNSView(context: Context) -> NSView { NSView() }
@@ -216,8 +232,14 @@ struct ScrollerFix: NSViewRepresentable {
             let ap = NSAppearance(named: dark ? .darkAqua : .aqua)
             sv.appearance = ap
             sv.scrollerStyle = .overlay                 // 细的覆盖式,无突兀轨道
-            sv.scrollerKnobStyle = dark ? .light : .dark
+            if !(sv.verticalScroller is SubtleScroller) {
+                let s = SubtleScroller()
+                s.scrollerStyle = .overlay
+                sv.verticalScroller = s
+            }
+            (sv.verticalScroller as? SubtleScroller)?.isDark = dark
             sv.verticalScroller?.appearance = ap
+            sv.verticalScroller?.needsDisplay = true
             sv.drawsBackground = false
             sv.backgroundColor = .clear
         }

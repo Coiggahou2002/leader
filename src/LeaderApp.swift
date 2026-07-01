@@ -731,7 +731,7 @@ struct ContentView: View {
             Divider().opacity(0.4)
             bottomBar
         }
-        .background(Color(nsColor: sidebarBGColor).ignoresSafeArea())
+        .background(VisualEffect().ignoresSafeArea())   // frosted translucent sidebar (Codex-like)
         .background {                                   // hidden keyboard shortcuts
             ZStack {
                 Button("") { focus = .search }

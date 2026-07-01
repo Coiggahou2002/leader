@@ -954,15 +954,20 @@ struct ContentView: View {
     private var list: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    switch mode {
-                    case .active: activeContent
-                    case .stale: staleContent
-                    case .archived: archivedContent
+                if store.loading && store.sessions.isEmpty {   // initial load: spinner, not a blank pane
+                    ProgressView().controlSize(.small)
+                        .frame(maxWidth: .infinity).padding(.top, 60)
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        switch mode {
+                        case .active: activeContent
+                        case .stale: staleContent
+                        case .archived: archivedContent
+                        }
                     }
+                    .padding(.horizontal, DS.gap).padding(.bottom, 20)
+                    .background(ScrollerFix(dark: scheme == .dark))
                 }
-                .padding(.horizontal, DS.gap).padding(.bottom, 20)
-                .background(ScrollerFix(dark: scheme == .dark))
             }
             .onChange(of: selectedID) { _, id in
                 if let id { withAnimation(.easeInOut(duration: 0.12)) { proxy.scrollTo(id, anchor: .center) } }

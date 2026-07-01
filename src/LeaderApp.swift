@@ -1107,6 +1107,7 @@ struct SettingsSheet: View {
     @State private var addr: String
     @State private var font: String
     @State private var fontSize: CGFloat
+    @State private var lineHeight: CGFloat
     @State private var softColors: Bool
     init() {
         let p = Conf.proxy
@@ -1114,6 +1115,7 @@ struct SettingsSheet: View {
         _addr = State(initialValue: p.isEmpty ? Conf.detectedEnvProxy() : p)
         _font = State(initialValue: Conf.termFont)
         _fontSize = State(initialValue: Conf.termFontSize)
+        _lineHeight = State(initialValue: Conf.lineHeight)
         _softColors = State(initialValue: Conf.softColors)
     }
     var body: some View {
@@ -1137,6 +1139,12 @@ struct SettingsSheet: View {
                         Text("\(Int(fontSize)) pt")
                             .font(.system(.body, design: .monospaced))
                     }
+                }
+                HStack {
+                    Text("行高").frame(width: 44, alignment: .leading)
+                    Slider(value: $lineHeight, in: 1.0...2.0, step: 0.05)
+                    Text(String(format: "%.2f×", lineHeight))
+                        .font(.system(.body, design: .monospaced)).frame(width: 52, alignment: .trailing)
                 }
                 Text("预览 The quick brown fox · 0123 (){}[]")
                     .font(.custom(font, size: fontSize))
@@ -1180,6 +1188,7 @@ struct SettingsSheet: View {
                     Conf.save(["proxy": val,
                                "term_font": font,
                                "term_font_size": Double(fontSize),
+                               "line_height": Double(lineHeight),
                                "soft_colors": softColors])
                     TerminalManager.shared.reapplyTheme()   // live terminals update now
                     QuakeTerminal.shared.reapplyTheme()

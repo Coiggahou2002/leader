@@ -29,6 +29,11 @@ enum Conf {
     // Soft ANSI palette on by default: 16-color TUIs (claude-hud bars, ls, etc.)
     // otherwise render with SwiftTerm's harsh default xterm palette.
     static var softColors: Bool { (dict["soft_colors"] as? Bool) ?? true }
+    // Line-height multiplier (needs the patched SwiftTerm). 1.0 = tight/upstream.
+    static var lineHeight: CGFloat {
+        let v = (dict["line_height"] as? Double).map { CGFloat($0) } ?? 1.2
+        return min(2.0, max(1.0, v))
+    }
     // Common monospaced families, filtered to those actually installed so the
     // Settings picker never offers a font that won't resolve.
     static let monoFontChoices: [String] = {
@@ -168,6 +173,7 @@ func applyTermTheme(_ tv: LocalProcessTerminalView) {
         if let f = NSFont(name: name, size: size) { tv.font = f; break }
     }
     if tv.font.pointSize != size { tv.font = .monospacedSystemFont(ofSize: size, weight: .regular) }
+    tv.lineHeightMultiplier = Conf.lineHeight   // patched SwiftTerm: extra line spacing
     tv.configureNativeColors()   // adaptive default (used when soft colors are off)
     // Soft (Kaku Dark) theme: the muted ANSI palette was tuned for Kaku's #15141b
     // background, so on SwiftTerm's default background it looks off. Apply the

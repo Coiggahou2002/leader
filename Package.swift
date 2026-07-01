@@ -5,7 +5,10 @@ let package = Package(
     name: "Leader",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0")
+        // Fork of SwiftTerm adding lineHeightMultiplier (adjustable terminal line
+        // spacing; upstream has no such option). Branch leader-line-height off 1.13.0.
+        .package(url: "https://github.com/Coiggahou2002/SwiftTerm.git",
+                 revision: "8d3bd3b7325e3faa623a82aee52b481176dbded9")
     ],
     targets: [
         .executableTarget(

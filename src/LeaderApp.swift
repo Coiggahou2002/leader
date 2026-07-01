@@ -457,6 +457,9 @@ struct ContentView: View {
     @State private var selectedID: String?
     @State private var activeSID: String?            // session embedded in the main area
     @State private var showSettings = false
+    @State private var showOpenPath = false          // Cmd+Shift+O quick-open
+    @State private var pathInput = ""
+    @State private var pathSel = 0
     // A just-created session: embedded immediately at a known sid, before the
     // scanner (every 6s) picks it up into store.sessions.
     @State private var pendingNew: (sid: String, cwd: String)?
@@ -464,7 +467,7 @@ struct ContentView: View {
     @AppStorage("leader.grouped") private var grouped = true
     @Environment(\.colorScheme) private var scheme
 
-    enum Focus { case list, search }
+    enum Focus { case list, search, openPath }
     // "" -> launch.py uses config.new_session_cwd() (default ~). Configure in
     // ~/.config/leader/config.json -> "new_session_cwd".
     static let newCwd = ""
@@ -510,15 +513,67 @@ struct ContentView: View {
     // "+": start a fresh session embedded right here. We mint the sid so there's no
     // race to discover it; claude --session-id starts the conversation at that id.
     private func newEmbeddedSession() {
+        newEmbeddedSession(in: Conf.newCwd.isEmpty ? "~" : Conf.newCwd)
+    }
+    private func newEmbeddedSession(in cwd: String) {
         let sid = UUID().uuidString.lowercased()
-        let cwd = Conf.newCwd.isEmpty ? "~" : Conf.newCwd
         _ = TerminalManager.shared.newSession(sid: sid, cwd: cwd)
         pendingNew = (sid, cwd)
         selectedID = sid
         activeSID = sid
-        store.flash("已新建会话")
+        store.flash("已在 \(prettyPath(expandTilde(cwd))) 新建会话")
         // pull the new session into the list once its transcript lands
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { store.refresh() }
+    }
+
+    // MARK: Cmd+Shift+O quick-open — type a directory (with live completion),
+    // Enter starts a new session there.
+    private func promptOpenPath() {
+        pathInput = "~/dev/"      // most sessions live here; user can clear it
+        pathSel = 0
+        showOpenPath = true
+        DispatchQueue.main.async { focus = .openPath }
+    }
+    private func prettyPath(_ p: String) -> String {
+        let home = NSHomeDirectory()
+        return p.hasPrefix(home) ? "~" + p.dropFirst(home.count) : p
+    }
+    // Directories under the typed path's parent whose name matches the last
+    // component. Hidden dirs shown only when the user is typing a dot.
+    private func pathCandidates(_ input: String) -> [String] {
+        guard !input.isEmpty else { return [] }
+        let ns = (input as NSString).expandingTildeInPath
+        let fm = FileManager.default
+        let dir: String, prefix: String
+        if input.hasSuffix("/") { dir = ns; prefix = "" }
+        else { dir = (ns as NSString).deletingLastPathComponent; prefix = (ns as NSString).lastPathComponent }
+        let base = dir.isEmpty ? "/" : dir
+        guard let entries = try? fm.contentsOfDirectory(atPath: base) else { return [] }
+        let showHidden = prefix.hasPrefix(".")
+        return entries.filter { e in
+            (showHidden || !e.hasPrefix(".")) &&
+            (prefix.isEmpty || e.lowercased().hasPrefix(prefix.lowercased()))
+        }.filter { e in
+            var isDir: ObjCBool = false
+            fm.fileExists(atPath: (base as NSString).appendingPathComponent(e), isDirectory: &isDir)
+            return isDir.boolValue
+        }.sorted().prefix(8).map { (base as NSString).appendingPathComponent($0) }
+    }
+    // Enter: open the typed dir if it exists, else the highlighted/first candidate.
+    private func commitOpenPath() {
+        let expanded = (pathInput as NSString).expandingTildeInPath
+        let cands = pathCandidates(pathInput)
+        var isDir: ObjCBool = false
+        var target: String?
+        if !pathInput.isEmpty,
+           FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir), isDir.boolValue {
+            target = expanded
+        } else if pathSel < cands.count { target = cands[pathSel] }
+        else { target = cands.first }
+        guard let t = target else { store.flash("路径不存在"); return }
+        showOpenPath = false
+        focus = .list
+        newEmbeddedSession(in: t)
     }
     private func beginRename(_ s: Session) {
         renameText = s.nickname ?? s.title ?? ""
@@ -577,6 +632,7 @@ struct ContentView: View {
                 .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
         }
         .ignoresSafeArea()                          // let both panes fill under the transparent titlebar
+        .overlay { openPathPanel }
         .frame(minWidth: 820, minHeight: 480)
         .onAppear { store.start(); focus = .list; updateQuakeCwd() }
         .onChange(of: activeSID) { _, _ in updateQuakeCwd() }
@@ -615,9 +671,13 @@ struct ContentView: View {
             bottomBar
         }
         .background(Color(nsColor: sidebarBGColor).ignoresSafeArea())
-        .background {                                   // Cmd+F -> focus search
-            Button("") { focus = .search }
-                .keyboardShortcut("f", modifiers: .command).opacity(0)
+        .background {                                   // hidden keyboard shortcuts
+            ZStack {
+                Button("") { focus = .search }
+                    .keyboardShortcut("f", modifiers: .command)
+                Button("") { promptOpenPath() }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
+            }.opacity(0)
         }
         .focusable()
         .focusEffectDisabled()                          // no blue focus ring around the sidebar
@@ -626,6 +686,67 @@ struct ContentView: View {
         .onKeyPress(.downArrow) { moveSelection(1); return .handled }
         .onKeyPress(.return) { openSelected(); return .handled }
         .overlay(alignment: .bottom) { toast }
+    }
+
+    // Cmd+Shift+O overlay: a floating input with live directory completion.
+    @ViewBuilder private var openPathPanel: some View {
+        if showOpenPath {
+            ZStack(alignment: .top) {
+                Color.black.opacity(0.28).ignoresSafeArea()
+                    .onTapGesture { showOpenPath = false; focus = .list }
+                let cands = pathCandidates(pathInput)
+                VStack(spacing: 0) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "folder").foregroundStyle(.secondary)
+                        TextField("输入目录路径,回车新建会话", text: $pathInput)
+                            .textFieldStyle(.plain).font(.title3)
+                            .focused($focus, equals: .openPath)
+                            .onChange(of: pathInput) { _, _ in pathSel = 0 }
+                            .onSubmit { commitOpenPath() }
+                            .onKeyPress(.downArrow) {
+                                if !cands.isEmpty { pathSel = min(pathSel + 1, cands.count - 1) }
+                                return .handled
+                            }
+                            .onKeyPress(.upArrow) { pathSel = max(pathSel - 1, 0); return .handled }
+                            .onKeyPress(.tab) {
+                                if pathSel < cands.count { pathInput = cands[pathSel] + "/"; pathSel = 0 }
+                                return .handled
+                            }
+                    }
+                    .padding(14)
+                    if !cands.isEmpty {
+                        Divider()
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                ForEach(Array(cands.enumerated()), id: \.element) { i, c in
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "folder.fill").font(.caption).foregroundStyle(.tertiary)
+                                        Text(prettyPath(c)).lineLimit(1)
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(.horizontal, 14).padding(.vertical, 7)
+                                    .background(i == pathSel ? Color.primary.opacity(0.12) : .clear)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { pathInput = c + "/"; pathSel = 0 }
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 260)
+                    }
+                }
+                .frame(width: 540)
+                .background(RoundedRectangle(cornerRadius: 14).fill(.regularMaterial))
+                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.08)))
+                .shadow(radius: 30, y: 12)
+                .padding(.top, 96)
+                // Esc to dismiss (hidden button so it works while the field is focused)
+                .background {
+                    Button("") { showOpenPath = false; focus = .list }
+                        .keyboardShortcut(.cancelAction).opacity(0)
+                }
+            }
+            .transition(.opacity)
+        }
     }
 
     // What to embed for the current activeSID: a scanned session if known, else

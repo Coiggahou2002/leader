@@ -238,14 +238,16 @@ final class TerminalManager: ObservableObject {
     }
     func isOpen(_ sid: String) -> Bool { views[sid] != nil }
     func close(_ sid: String) {
-        guard let v = views[sid] else { return }
-        // Untrack FIRST: terminate() fires processTerminated -> markExited async,
-        // which would otherwise re-add this sid to `exited` and leave a stale badge
-        // on the sidebar item. An explicit close must clear the badge entirely.
-        views.removeValue(forKey: sid)
+        // Clear badge state UNCONDITIONALLY first — even if the view is somehow
+        // already gone, the sidebar badge (driven by running/exited) must clear.
+        // Doing it before terminate() also means the async processTerminated ->
+        // markExited (below) sees the view untracked and won't re-add `exited`.
         running.remove(sid); exited.remove(sid)
-        v.terminate()
-        v.removeFromSuperview()
+        if let v = views[sid] {
+            views.removeValue(forKey: sid)
+            v.terminate()
+            v.removeFromSuperview()
+        }
     }
     // Process exited on its own (claude quit) -> show the "exited" badge. Ignore
     // terminations from an explicit close() (the view is already untracked).

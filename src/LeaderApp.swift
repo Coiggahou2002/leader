@@ -574,7 +574,9 @@ struct ContentView: View {
             terminalArea
                 .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
                 .background(TerminalAreaProbe())   // anchors the scratch terminal over this pane
+                .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
         }
+        .ignoresSafeArea()                          // let both panes fill under the transparent titlebar
         .frame(minWidth: 820, minHeight: 480)
         .onAppear { store.start(); focus = .list; updateQuakeCwd() }
         .onChange(of: activeSID) { _, _ in updateQuakeCwd() }

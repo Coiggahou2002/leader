@@ -26,6 +26,9 @@ enum Conf {
     static var termFontSize: CGFloat {
         (dict["term_font_size"] as? Double).map { CGFloat($0) } ?? 13
     }
+    // Soft ANSI palette on by default: 16-color TUIs (claude-hud bars, ls, etc.)
+    // otherwise render with SwiftTerm's harsh default xterm palette.
+    static var softColors: Bool { (dict["soft_colors"] as? Bool) ?? true }
     // Common monospaced families, filtered to those actually installed so the
     // Settings picker never offers a font that won't resolve.
     static let monoFontChoices: [String] = {
@@ -123,6 +126,40 @@ func newSessionCommand(sid: String) -> String {
 }
 func expandTilde(_ p: String) -> String { (p as NSString).expandingTildeInPath }
 
+// 8-bit hex (0xRRGGBB) -> SwiftTerm.Color (its components are 16-bit, so ×257).
+private func hexColor(_ hex: Int) -> SwiftTerm.Color {
+    SwiftTerm.Color(red: UInt16((hex >> 16) & 0xff) * 257,
+                    green: UInt16((hex >> 8) & 0xff) * 257,
+                    blue: UInt16(hex & 0xff) * 257)
+}
+
+// The 16 ANSI colors of "Kaku Dark", copied verbatim from tw93/kaku
+// (assets/.../kaku.lua, a softened "Aura" theme). The ANSI color CODES that
+// programs emit (e.g. claude-hud's `ESC[32m` green) index INTO this table, so
+// installing it makes those programs render with Kaku's muted hues instead of
+// the default saturated xterm palette. Order: 0-7 normal, 8-15 bright.
+//
+// Caveat: slot 0 (black) is Kaku's light #c8c6cc so black *foreground* stays
+// readable on a dark background — but SwiftTerm uses one color per slot for both
+// fg and bg, so a program that paints an ANSI-black *background* will get light
+// grey. Kaku dodges this with a separate bg override we can't express here; it's
+// a rare case and the price of matching Kaku's palette exactly.
+let kakuAnsiPalette: [SwiftTerm.Color] = [
+    hexColor(0xc8c6cc), hexColor(0xd85d5d), hexColor(0x58d8ad), hexColor(0xdaae76),
+    hexColor(0x68afda), hexColor(0x8e6ad9), hexColor(0x58d8ad), hexColor(0xd5d4d6),
+    hexColor(0x6d6d6d), hexColor(0xd85d5d), hexColor(0x58d8ad), hexColor(0xdaae76),
+    hexColor(0x90c9e6), hexColor(0x8e6ad9), hexColor(0x58d8ad), hexColor(0xd5d4d6),
+]
+
+// SwiftTerm's own default 16 (its `defaultInstalledColors` is internal, so we
+// copy the exact values here) — used when the soft palette is toggled off.
+let defaultAnsiPalette: [SwiftTerm.Color] = [
+    hexColor(0x000000), hexColor(0x990001), hexColor(0x00a603), hexColor(0x999900),
+    hexColor(0x0300b2), hexColor(0xb200b2), hexColor(0x00a5b2), hexColor(0xbfbfbf),
+    hexColor(0x8a898a), hexColor(0xe50001), hexColor(0x00d800), hexColor(0xe5e500),
+    hexColor(0x0700fe), hexColor(0xe500e5), hexColor(0x00e5e5), hexColor(0xe5e5e5),
+]
+
 func applyTermTheme(_ tv: LocalProcessTerminalView) {
     let size = Conf.termFontSize
     // Try the configured font first, then sensible fallbacks, then the system
@@ -132,6 +169,9 @@ func applyTermTheme(_ tv: LocalProcessTerminalView) {
     }
     if tv.font.pointSize != size { tv.font = .monospacedSystemFont(ofSize: size, weight: .regular) }
     tv.configureNativeColors()
+    // Soft (Kaku) 16-color palette vs SwiftTerm's default — the actual fix for
+    // "harsh" indexed colors. installColors needs exactly 16 or it no-ops.
+    tv.installColors(Conf.softColors ? kakuAnsiPalette : defaultAnsiPalette)
 }
 
 final class EmbeddedTerminalView: LocalProcessTerminalView {

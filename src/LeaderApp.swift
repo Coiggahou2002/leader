@@ -1115,12 +1115,14 @@ struct SettingsSheet: View {
     @State private var addr: String
     @State private var font: String
     @State private var fontSize: CGFloat
+    @State private var softColors: Bool
     init() {
         let p = Conf.proxy
         _enabled = State(initialValue: !p.isEmpty)
         _addr = State(initialValue: p.isEmpty ? Conf.detectedEnvProxy() : p)
         _font = State(initialValue: Conf.termFont)
         _fontSize = State(initialValue: Conf.termFontSize)
+        _softColors = State(initialValue: Conf.softColors)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1150,6 +1152,9 @@ struct SettingsSheet: View {
                     .padding(6).frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
                 Text("行距无法调整:终端引擎(SwiftTerm)按字体自身度量决定行高,不提供行距设置。")
+                    .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+                Toggle("柔和配色(Kaku 调色板)", isOn: $softColors)
+                Text("套用 Kaku Dark 的 16 色 ANSI 调色板,让 claude-hud 进度条等只发索引色的程序不再刺眼。关闭则用默认 xterm 配色。")
                     .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
             }
 
@@ -1182,7 +1187,8 @@ struct SettingsSheet: View {
                     let val = enabled ? addr.trimmingCharacters(in: .whitespaces) : ""
                     Conf.save(["proxy": val,
                                "term_font": font,
-                               "term_font_size": Double(fontSize)])
+                               "term_font_size": Double(fontSize),
+                               "soft_colors": softColors])
                     TerminalManager.shared.reapplyTheme()   // live terminals update now
                     QuakeTerminal.shared.reapplyTheme()
                     dismiss()

@@ -277,6 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window = w
         w.titlebarAppearsTransparent = true
         w.titleVisibility = .hidden
+        w.titlebarSeparatorStyle = .none          // kill the hairline strip under the titlebar
         w.isMovableByWindowBackground = true
         w.isOpaque = false
         w.backgroundColor = .clear

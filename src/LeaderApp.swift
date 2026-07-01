@@ -299,6 +299,22 @@ extension Notification.Name {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static var pinned = false   // window stays normal level; opt-in via the pin toolbar button
     var window: NSWindow?
+
+    // Single-instance guard. Finder double-click already de-dups a .app by bundle
+    // id, but launching the raw binary (or two mismatched bundles) does not — so if
+    // another Leader is already up, hand focus to it and bow out before the window
+    // is built. Runs in willFinish (earliest hook) to avoid a second window flashing.
+    func applicationWillFinishLaunching(_ n: Notification) {
+        let me = NSRunningApplication.current
+        let bid = Bundle.main.bundleIdentifier ?? "com.leader.app"
+        let other = NSRunningApplication.runningApplications(withBundleIdentifier: bid)
+            .first { $0.processIdentifier != me.processIdentifier && !$0.isTerminated }
+        if let other {
+            other.activate(options: [.activateAllWindows])
+            exit(0)
+        }
+    }
+
     func applicationDidFinishLaunching(_ n: Notification) {
         installScrollMonitor()                       // wheel -> embedded terminal
         QuakeTerminal.shared.installHotkey()          // double-tap Control -> scratch terminal

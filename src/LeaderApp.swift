@@ -129,6 +129,12 @@ final class Store {
     var loading = false
     var toast: String?
     @ObservationIgnored private var timer: Timer?
+    // Bumped whenever a write lands. A scan captures the epoch when it *starts*;
+    // if the epoch has advanced by the time it finishes, a mutation happened after
+    // it began, so its snapshot is stale and must not clobber the optimistic state.
+    // This is what kills the archive flicker: an in-flight periodic scan that
+    // started pre-archive can no longer overwrite the just-archived row.
+    @ObservationIgnored private var epoch = 0
     func start() {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] _ in
@@ -136,10 +142,15 @@ final class Store {
         }
     }
     func refresh() {
+        let e = epoch
         loading = true
         Task.detached(priority: .userInitiated) {
             let s = Backend.scan()
-            await MainActor.run { self.sessions = s; self.loading = false }
+            await MainActor.run {
+                self.loading = false
+                guard e == self.epoch else { return }   // a write landed after this scan started → stale
+                self.sessions = s
+            }
         }
     }
     func open(_ s: Session) {
@@ -153,7 +164,7 @@ final class Store {
         flash(on ? "已归档" : "已取消归档")
         Task.detached(priority: .userInitiated) {
             Backend.setArchived(s, on)
-            await MainActor.run { self.refresh() }       // 后台落盘后对账
+            await MainActor.run { self.epoch += 1; self.refresh() }   // 落盘后对账;并作废落盘前发起的扫描
         }
     }
     func setPinned(_ s: Session, _ on: Bool) {
@@ -161,14 +172,14 @@ final class Store {
         flash(on ? "已置顶" : "已取消置顶")
         Task.detached(priority: .userInitiated) {
             Backend.setPinned(s, on)
-            await MainActor.run { self.refresh() }
+            await MainActor.run { self.epoch += 1; self.refresh() }   // invalidate scans started before this write landed
         }
     }
     func newSession(_ cwd: String) {
         flash("正在新建会话…")
         Task.detached(priority: .userInitiated) {
             Backend.newSession(cwd)
-            await MainActor.run { self.refresh() }
+            await MainActor.run { self.epoch += 1; self.refresh() }   // invalidate scans started before this write landed
         }
     }
     func setNickname(_ s: Session, _ nick: String) {
@@ -177,7 +188,7 @@ final class Store {
         flash(trimmed.isEmpty ? "已恢复原标题" : "已重命名")
         Task.detached(priority: .userInitiated) {
             Backend.setNickname(s, trimmed)
-            await MainActor.run { self.refresh() }
+            await MainActor.run { self.epoch += 1; self.refresh() }   // invalidate scans started before this write landed
         }
     }
     private func optimistic(_ id: String, _ change: (inout Session) -> Void) {

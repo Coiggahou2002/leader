@@ -87,6 +87,11 @@ final class QuakeTerminal: NSObject {
         p.setFrame(g.hidden, display: false)
         p.alphaValue = 0
         NSApp.activate(ignoringOtherApps: true)
+        // Attach to Leader's window so the two stack together (occluded together).
+        // orderOut on collapse can drop the relationship, so (re)establish it here.
+        if let parent = leaderWindow(), p.parent == nil {
+            parent.addChildWindow(p, ordered: .above)
+        }
         p.makeKeyAndOrderFront(nil)
         if let t = term { p.makeFirstResponder(t) }
         NSAnimationContext.runAnimationGroup { ctx in
@@ -110,6 +115,13 @@ final class QuakeTerminal: NSObject {
             p.animator().alphaValue = 0
         }, completionHandler: { p.orderOut(nil) })
         visible = false
+    }
+
+    // Leader's main window (the panel's parent). The anchor probe lives in the
+    // right pane, so its window IS the Leader window; fall back if not laid out.
+    private func leaderWindow() -> NSWindow? {
+        if let w = anchorView?.window, w !== panel { return w }
+        return NSApp.mainWindow ?? NSApp.windows.first { $0 !== panel && !($0 is QuakePanel) }
     }
 
     // On-screen rect of the terminal area (or nil if not laid out yet).
@@ -151,12 +163,17 @@ final class QuakeTerminal: NSObject {
         if let p = panel { return p }
         let p = QuakePanel(contentRect: NSRect(x: 0, y: 0, width: 900, height: 520),
                            styleMask: [.borderless], backing: .buffered, defer: false)
-        p.level = .floating
+        // Normal level (NOT .floating) + attached as a child of Leader's window in
+        // show(): the scratch panel is then tied to Leader's stacking, so covering
+        // Leader with another app's window covers the panel too, instead of it
+        // floating above everything. (.canJoinAllSpaces dropped for the same reason —
+        // a child window already follows its parent's Space.)
+        p.level = .normal
         p.isOpaque = false
         p.backgroundColor = .clear
         p.hasShadow = true
         p.isMovableByWindowBackground = true          // drag the top bar to move it
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.collectionBehavior = [.fullScreenAuxiliary]
         p.hidesOnDeactivate = false
 
         let container = NSView()

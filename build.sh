@@ -32,7 +32,7 @@ cp "$ASSET/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 for b in "$BIN"/*.bundle; do
   [ -e "$b" ] && cp -R "$b" "$APP/Contents/Resources/"
 done
-for f in config.py scan.py launch.py archive.py pin.py name.py; do
+for f in config.py scan.py launch.py archive.py pin.py name.py leader-hook.py; do
   cp "$SRC/$f" "$APP/Contents/Resources/backend/$f"
 done
 cat > "$APP/Contents/Info.plist" <<'PLIST'

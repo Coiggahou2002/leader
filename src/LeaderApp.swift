@@ -122,6 +122,37 @@ enum Backend {
     }
 }
 
+// MARK: - Leader data paths + hook install
+enum LeaderPaths {
+    static let dataDir = NSString(string: "~/.claude/leader").expandingTildeInPath
+    // Per-session turn-lifecycle records written by leader-hook.py (Stop / etc.),
+    // watched by Activity to pulse the sidebar. Kept separate from scan.py's
+    // `registry` (live-pane mapping) so the two concerns don't collide.
+    static let activityDir = dataDir + "/activity"
+    static let hooksSettings = dataDir + "/leader-hooks.json"
+    static var hookScript: String { Backend.dir + "/leader-hook.py" }
+}
+
+// Write the `--settings` JSON that registers leader-hook.py on the turn-lifecycle
+// hooks, and return its path. Merged (not replacing) on top of the user's own
+// settings, so OpenIsland's hooks keep firing. Rewritten each call so the script
+// path stays correct even for an isolated verify build. Returns "" on failure so
+// the caller can skip `--settings` rather than pass a broken path.
+@discardableResult
+func ensureLeaderHookSettings() -> String {
+    let cmd = "/usr/bin/python3 '\(LeaderPaths.hookScript)' '\(LeaderPaths.activityDir)'"
+    let entry: [[String: Any]] = [["hooks": [["type": "command", "command": cmd]]]]
+    let json: [String: Any] = ["hooks": [
+        "UserPromptSubmit": entry, "Stop": entry, "SessionEnd": entry,
+    ]]
+    let fm = FileManager.default
+    try? fm.createDirectory(atPath: LeaderPaths.dataDir, withIntermediateDirectories: true)
+    guard let data = try? JSONSerialization.data(withJSONObject: json),
+          (try? data.write(to: URL(fileURLWithPath: LeaderPaths.hooksSettings))) != nil
+    else { return "" }
+    return LeaderPaths.hooksSettings
+}
+
 // MARK: - Store
 @MainActor @Observable
 final class Store {
@@ -198,6 +229,132 @@ final class Store {
     func flash(_ m: String) {
         toast = m
         Task { try? await Task.sleep(for: .seconds(2)); if toast == m { toast = nil } }
+    }
+}
+
+// MARK: - Activity (turn-completion breathing light)
+// Watches the activity dir that leader-hook.py writes on every turn's Stop, and
+// exposes `attention`: the set of sessions that FINISHED WHILE NOT FOCUSED. The
+// scenario: you leave session A reasoning, switch to B; when A's claude finishes,
+// A's sidebar row breathes until you look at it. FSEvents gives sub-second latency
+// (the 6s scan would feel laggy); a 3s poll backstops any coalesced/missed event.
+@MainActor
+final class Activity: ObservableObject {
+    static let shared = Activity()
+    @Published private(set) var attention: Set<String> = []   // full_sids needing a pulse (done while unfocused)
+    @Published private(set) var running: Set<String> = []      // full_sids reasoning NOW (UserPromptSubmit..Stop)
+    var focusedSID: String?                                    // the embedded session
+
+    private var appActive = true
+    private var source: DispatchSourceFileSystemObject?
+    private var fd: Int32 = -1
+    private var seen: [String: Double] = [:]                   // full_sid -> last handled ts
+    private var timer: Timer?
+    private var started = false
+
+    func start() {
+        guard !started else { return }
+        started = true
+        try? FileManager.default.createDirectory(atPath: LeaderPaths.activityDir,
+                                                 withIntermediateDirectories: true)
+        ensureLeaderHookSettings()
+        pruneOld()
+        for (sid, ts, _) in readAll() { seen[sid] = ts }      // seed: don't pulse pre-existing files
+        installWatcher()
+        appActive = NSApp.isActive
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) {
+            [weak self] _ in Task { @MainActor in self?.appBecameActive() }
+        }
+        nc.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) {
+            [weak self] _ in Task { @MainActor in self?.appActive = false }
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.process() }
+        }
+    }
+
+    // User is now looking at this session -> it no longer needs attention.
+    func markFocused(_ sid: String?) {
+        focusedSID = sid
+        if let sid, attention.contains(sid) { attention.remove(sid) }
+    }
+
+    private func appBecameActive() {
+        appActive = true
+        if let f = focusedSID, attention.contains(f) { attention.remove(f) }   // returned to a done session
+    }
+
+    private func installWatcher() {
+        fd = open(LeaderPaths.activityDir, O_EVTONLY)
+        guard fd >= 0 else { return }
+        // Atomic os.replace() in the hook lands as a rename INTO the dir, which the
+        // directory vnode reports as .write — so dir-level watching catches it.
+        let s = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd,
+                                                          eventMask: [.write], queue: .main)
+        s.setEventHandler { [weak self] in Task { @MainActor in self?.process() } }
+        s.setCancelHandler { [fd] in close(fd) }
+        s.resume()
+        source = s
+    }
+
+    private func process() {
+        for (sid, ts, event) in readAll() {
+            guard ts > (seen[sid] ?? 0) else { continue }   // only newly-written records
+            seen[sid] = ts
+            switch event {
+            case "Stop":
+                running.remove(sid)                          // reasoning finished
+                if sid == focusedSID && appActive { attention.remove(sid) }   // you're watching it
+                else { attention.insert(sid) }
+            case "UserPromptSubmit":
+                running.insert(sid)                          // reasoning started -> spinner
+                attention.remove(sid)                        // work resumed -> clear stale pulse
+            case "SessionEnd":
+                running.remove(sid); attention.remove(sid)   // session gone
+            default: break
+            }
+        }
+    }
+
+    private func readAll() -> [(String, Double, String)] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: LeaderPaths.activityDir) else { return [] }
+        var out: [(String, Double, String)] = []
+        for n in names where n.hasSuffix(".json") {
+            guard let d = fm.contents(atPath: LeaderPaths.activityDir + "/" + n),
+                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let sid = o["sid"] as? String, let ts = o["ts"] as? Double else { continue }
+            out.append((sid, ts, (o["event"] as? String) ?? ""))
+        }
+        return out
+    }
+
+    private func pruneOld() {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: LeaderPaths.activityDir) else { return }
+        let cutoff = Date().addingTimeInterval(-14 * 86400)
+        for n in names where n.hasSuffix(".json") {
+            let p = LeaderPaths.activityDir + "/" + n
+            if let m = (try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date, m < cutoff {
+                try? fm.removeItem(atPath: p)
+            }
+        }
+    }
+}
+
+// A soft pulsing dot ("呼吸灯") shown on a sidebar row whose session just finished.
+struct BreathingDot: View {
+    @State private var on = false
+    private let color = Color(red: 0x8e / 255, green: 0x6a / 255, blue: 0xd9 / 255)  // Kaku accent purple
+    var body: some View {
+        Circle().fill(color)
+            .frame(width: 7, height: 7)
+            .opacity(on ? 1.0 : 0.28)
+            .shadow(color: color.opacity(on ? 0.75 : 0), radius: on ? 3.5 : 0)
+            .animation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true), value: on)
+            .onAppear { on = true }
+            .help("此会话已完成")
     }
 }
 
@@ -416,6 +573,7 @@ struct Row: View {
     var selected: Bool = false
     @Binding var hoveredID: String?
     @ObservedObject var term = TerminalManager.shared   // embed state (running/exited)
+    @ObservedObject var activity = Activity.shared       // turn-completion pulse
     // single shared hovered id -> at most one row highlights, even mid-scroll
     private var hover: Bool { hoveredID == s.id }
     private var dotColor: Color { s.needsAttention ? .red : (s.alive ? .green : .secondary) }
@@ -439,6 +597,7 @@ struct Row: View {
                         Image(systemName: sym).font(.caption2).foregroundStyle(embedColor)
                             .help(sym == "terminal.fill" ? "已嵌入运行" : "已嵌入(进程已退出)")
                     }
+                    if activity.attention.contains(s.full_sid) { BreathingDot() }
                 }
                 Text("\(s.repo)@\(s.branch ?? "?") · \(s.ago)前 · \(s.msgs)条/\(s.tok)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -715,8 +874,8 @@ struct ContentView: View {
         .ignoresSafeArea()                          // let both panes fill under the transparent titlebar
         .overlay { openPathPanel }
         .frame(minWidth: 820, minHeight: 480)
-        .onAppear { store.start(); focus = .list; updateQuakeCwd() }
-        .onChange(of: activeSID) { _, _ in updateQuakeCwd() }
+        .onAppear { store.start(); Activity.shared.start(); focus = .list; updateQuakeCwd() }
+        .onChange(of: activeSID) { _, id in updateQuakeCwd(); Activity.shared.markFocused(id) }
         .sheet(item: $renameTarget) { s in
             RenameSheet(session: s, text: $renameText,
                         onSave: { store.setNickname(s, $0); renameTarget = nil },

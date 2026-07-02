@@ -120,11 +120,18 @@ func proxyExport() -> String {
 // shell command because termCleanEnv() strips all CLAUDE_CODE* from the inherited env.
 let fullRepaintExport = "export CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT=1"
 
+// `--settings <file>` registers leader-hook.py on the turn-lifecycle hooks so the
+// sidebar can breathe when this session finishes. It MERGES on top of the user's
+// settings (OpenIsland's hooks keep firing). Empty path -> skip the flag.
+func hookSettingsArg() -> String {
+    let p = ensureLeaderHookSettings()
+    return p.isEmpty ? "" : " --settings '\(p)'"
+}
 func resumeCommand(sid: String) -> String {
     let unset = "unset " + POISON.joined(separator: " ")
     let fallback = Conf.claudeBin.isEmpty ? "$HOME/.local/bin/claude" : Conf.claudeBin
     return "\(unset); \(proxyExport()); \(fullRepaintExport); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
-         + "\"$CLAUDE\" --dangerously-skip-permissions --resume \(sid); exec /bin/zsh -i"
+         + "\"$CLAUDE\" --dangerously-skip-permissions\(hookSettingsArg()) --resume \(sid); exec /bin/zsh -i"
 }
 // New session with a caller-chosen session id, so the app knows the sid up front
 // (no scan race). `claude --session-id <uuid>` starts a fresh conversation at that id.
@@ -132,7 +139,7 @@ func newSessionCommand(sid: String) -> String {
     let unset = "unset " + POISON.joined(separator: " ")
     let fallback = Conf.claudeBin.isEmpty ? "$HOME/.local/bin/claude" : Conf.claudeBin
     return "\(unset); \(proxyExport()); \(fullRepaintExport); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
-         + "\"$CLAUDE\" --dangerously-skip-permissions --session-id \(sid); exec /bin/zsh -i"
+         + "\"$CLAUDE\" --dangerously-skip-permissions\(hookSettingsArg()) --session-id \(sid); exec /bin/zsh -i"
 }
 func expandTilde(_ p: String) -> String { (p as NSString).expandingTildeInPath }
 

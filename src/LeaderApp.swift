@@ -343,6 +343,22 @@ final class Activity: ObservableObject {
     }
 }
 
+// A tiny spinning arc shown in place of the status dot while a session is actively
+// reasoning (between UserPromptSubmit and Stop). Sized to the 8px dot slot.
+struct SpinnerDot: View {
+    @State private var spin = false
+    var body: some View {
+        Circle()
+            .trim(from: 0, to: 0.7)
+            .stroke(Color.green, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+            .frame(width: 8, height: 8)
+            .rotationEffect(.degrees(spin ? 360 : 0))
+            .animation(.linear(duration: 0.8).repeatForever(autoreverses: false), value: spin)
+            .onAppear { spin = true }
+            .help("正在推理…")
+    }
+}
+
 // A soft pulsing dot ("呼吸灯") shown on a sidebar row whose session just finished.
 struct BreathingDot: View {
     @State private var on = false
@@ -588,8 +604,14 @@ struct Row: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: DS.gap + 3) {
-            Circle().fill(dotColor).frame(width: 7, height: 7)
-                .alignmentGuide(.firstTextBaseline) { d in d[.bottom] - 2 }
+            Group {
+                // Actively reasoning -> spinner; else the red/green/grey status dot.
+                // Guard on s.alive so a crashed session (no Stop) can't spin forever.
+                if activity.running.contains(s.full_sid) && s.alive { SpinnerDot() }
+                else { Circle().fill(dotColor).frame(width: 7, height: 7) }
+            }
+            .frame(width: 8, height: 8)
+            .alignmentGuide(.firstTextBaseline) { d in d[.bottom] - 2 }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(s.name).font(.callout).bold().lineLimit(1)

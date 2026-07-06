@@ -61,7 +61,11 @@ def live_map() -> tuple[dict, dict]:
     except Exception:
         return sid2tty, cwd2ttys
     for line in ps.splitlines():
-        if " claude" not in line or "OpenIsland" in line or "/bin/zsh" in line:
+        # NOTE: no leading space in the "claude" test — Leader's embedded panes
+        # exec the FULL PATH (/…/.local/bin/claude), which " claude" never
+        # matched, so embedded sessions were invisible to alive-detection.
+        # /bin/zsh still excluded: the wrapper line duplicates the child's argv.
+        if "claude" not in line or "OpenIsland" in line or "/bin/zsh" in line:
             continue
         m = re.match(r"\s*(\d+)\s+(ttys\d+)\s+(.*claude.*)", line)
         if not m:

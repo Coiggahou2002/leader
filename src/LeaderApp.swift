@@ -832,6 +832,7 @@ struct ContentView: View {
     @State private var pathInput = ""
     @State private var pathSel = 0
     @State private var confirmCloseActive = false    // Cmd+W confirm
+    @State private var closeTarget: (sid: String, name: String)?   // what Cmd+W will close
     // A just-created session: embedded immediately at a known sid, before the
     // scanner (every 6s) picks it up into store.sessions.
     @State private var pendingNew: (sid: String, cwd: String)?
@@ -1032,26 +1033,36 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showSettings) { SettingsSheet() }
         .onReceive(NotificationCenter.default.publisher(for: .leaderCloseActive)) { _ in
-            if activeEmbed != nil { confirmCloseActive = true }   // ignore when nothing is open
+            // Target the embedded session in the main pane; else fall back to the
+            // sidebar-SELECTED row if its terminal is open (e.g. selecting in 活跃
+            // with ↑/↓ and hitting Cmd+W while the main pane is empty). A silent
+            // no-op here read as "close is broken", so always give feedback.
+            if let a = activeEmbed {
+                closeTarget = (a.sid, a.name); confirmCloseActive = true
+            } else if let id = selectedID, let s = store.sessions.first(where: { $0.id == id }),
+                      TerminalManager.shared.isOpen(s.full_sid) {
+                closeTarget = (s.full_sid, s.name); confirmCloseActive = true
+            } else {
+                store.flash("没有打开的会话终端")
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .leaderFocusSearch)) { _ in
             focus = .search
         }
-        .confirmationDialog("关闭当前会话?", isPresented: $confirmCloseActive, titleVisibility: .visible) {
-            Button("关闭会话", role: .destructive) { closeActiveSession() }
+        .confirmationDialog("关闭会话终端?", isPresented: $confirmCloseActive, titleVisibility: .visible) {
+            Button("关闭会话", role: .destructive) { if let t = closeTarget { closeSession(t.sid) } }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("会杀掉「\(activeEmbed?.name ?? "")」的嵌入进程(transcript 已保存,可重新打开)。Leader 不会退出。")
+            Text("会杀掉「\(closeTarget?.name ?? "")」的嵌入进程(transcript 已保存,可重新打开)。Leader 不会退出。")
         }
     }
 
-    // Cmd+W / header ✕: close only the embedded session shown in the main area.
-    private func closeActiveSession() {
-        guard let sid = activeEmbed?.sid else { return }
+    // Close one session's embedded terminal (Cmd+W target or the header ✕).
+    private func closeSession(_ sid: String) {
         TerminalManager.shared.close(sid)
         store.markTerminalClosed(sid)     // drop from 活跃 immediately, then reconcile
         if pendingNew?.sid == sid { pendingNew = nil }
-        activeSID = nil
+        if activeSID == sid { activeSID = nil }
     }
 
     // The scratch (quake) terminal opens in the active session's working dir; keep
@@ -1206,7 +1217,7 @@ struct ContentView: View {
                     .help("在独立 kitty 窗口打开(全屏 TUI 滚动用)")
             }
             Button("关闭会话终端", systemImage: "xmark.circle.fill") {
-                closeActiveSession()      // same path as Cmd+W (kills tree + clears 活跃)
+                closeSession(sid)         // same path as Cmd+W (kills tree + clears 活跃)
             }
             .buttonStyle(.plain).labelStyle(.iconOnly).foregroundStyle(.secondary)
             .help("杀掉嵌入的 claude 进程(列表项保留)")

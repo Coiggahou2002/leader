@@ -133,7 +133,13 @@ def launch(sid: str, cwd: str = "") -> dict:
     return {"ok": True, "reused": False, "win": winmap[sid]}
 
 def _project_dir(cwd: str) -> str:
-    enc = cwd.rstrip("/").replace("/", "-")
+    # claude encodes the cwd into the project-folder name by turning EVERY
+    # non-alphanumeric char (/ _ . -) into '-'. A naive '/'->'-' misses dirs
+    # with _ or . and then the new-session sid poll looks in the wrong folder.
+    # match scan.py._encode exactly: ASCII-alnum kept, everything else -> '-'
+    # (Python's str.isalnum() would keep CJK, which does NOT match claude).
+    enc = "".join(c if (c.isascii() and c.isalnum()) else "-"
+                  for c in cwd.rstrip("/"))
     return os.path.join(config.projects_dir(), enc)
 
 def new_session(cwd: str) -> dict:

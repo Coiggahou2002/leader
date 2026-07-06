@@ -13,11 +13,13 @@ pile. It lets you:
 - a per-session **close** button kills that embedded process but keeps the list
   item; an **open in kitty window** button is the escape hatch (e.g. for
   `/tui fullscreen`, which doesn't scroll cleanly when embedded)
-- an **embed badge** on each row: filled+green while its in-app claude runs,
-  hollow grey once it exits
-- **pin** frequently-used sessions, **archive** ones you're done with,
-  **rename** any session (a Leader-only nickname), **search** by title / folder /
-  last message, group by folder or sort by recency
+- a session that is **actively reasoning shimmers**: its title dims and a bright
+  band sweeps across it (ChatGPT "Working…"-style); a quiet grey **embed badge**
+  marks rows whose in-app claude process is alive (filled) or has exited (hollow)
+- **pin** frequently-used sessions via right-click — they gather under a 置顶
+  section with a single golden star on the header; **archive** (icon appears on
+  hover) ones you're done with, **rename** any session (a Leader-only nickname),
+  **search** by title / folder / last message, group by folder or sort by recency
 - **+** to start a brand-new session embedded right here — the session id is
   minted up front (`claude --session-id`), so there's no race to find it
 - the window is normal-level by default; a **pin** toolbar button toggles

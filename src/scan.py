@@ -270,6 +270,7 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
     sid2tty, cwd2ttys = live_map()
     archived = _flag_set("archived")
     pinned = _flag_set("pinned")
+    unread = _flag_set("unread")
     try:
         names = json.load(open(config.data_file("names.json")))
     except Exception:
@@ -295,7 +296,8 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
             where = "⚪ 已关"
         d.update(bucket=bucket, why=why, wt=wt, full_sid=full_sid,
                  alive=alive, where=where, archived=full_sid in archived,
-                 pinned=full_sid in pinned, nickname=names.get(full_sid))
+                 pinned=full_sid in pinned, unread=full_sid in unread,
+                 nickname=names.get(full_sid))
         sessions.append(d)
 
     home = os.path.expanduser("~")

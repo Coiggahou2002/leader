@@ -28,6 +28,7 @@ let package = Package(
                 "archive.py", "backup-transcripts.sh", "build.sh", "config.py",
                 "launch.py", "leader-hook.py", "makeicon.swift", "name.py",
                 "pin.py", "scan.py", "server.py", "start.sh", "test_switch.py",
+                "unread.py",
             ],
             sources: ["LeaderApp.swift", "EmbeddedTerminal.swift", "QuakeTerminal.swift"]
         ),

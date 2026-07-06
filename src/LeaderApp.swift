@@ -195,10 +195,14 @@ final class Store {
         }
     }
     func setArchived(_ s: Session, _ on: Bool) {
-        optimistic(s.id) { $0.archived = on }            // UI 立即变
+        // Archiving also unpins: "archived but still pinned" is a contradiction —
+        // the pin survived invisibly and un-archiving teleported the session into
+        // 置顶 instead of back to its folder, which reads as "unarchive did nothing".
+        optimistic(s.id) { $0.archived = on; if on { $0.pinned = false } }   // UI 立即变
         flash(on ? "已归档" : "已取消归档")
         Task.detached(priority: .userInitiated) {
             Backend.setArchived(s, on)
+            if on && s.pinned { Backend.setPinned(s, false) }
             await MainActor.run { self.epoch += 1; self.refresh() }   // 落盘后对账;并作废落盘前发起的扫描
         }
     }
@@ -723,7 +727,11 @@ struct Row: View {
             // Archive is a deliberate action: keep it out of sight until the row is
             // hovered. The trailing hit-zone still works — clicking requires the
             // pointer to be on the row, which is exactly when the icon is visible.
-            Image(systemName: archiveSymbol).foregroundStyle(.secondary)
+            // Un-archive is tinted: at caption size the two glyphs look alike, and
+            // a grey box on a just-unarchived row reads as "nothing changed".
+            Image(systemName: archiveSymbol)
+                .foregroundStyle(s.archived ? AnyShapeStyle(Color.accentColor)
+                                            : AnyShapeStyle(.secondary))
                 .frame(width: 18)
                 .font(.caption)
                 .opacity(hover ? 1 : 0)
@@ -819,6 +827,7 @@ struct ContentView: View {
     @FocusState private var focus: Focus?
     @AppStorage("leader.grouped") private var grouped = true
     @Environment(\.colorScheme) private var scheme
+    @ObservedObject private var term = TerminalManager.shared   // 活跃 tab: embed liveness
 
     enum Focus { case list, search, openPath }
     // "" -> launch.py uses config.new_session_cwd() (default ~). Configure in
@@ -830,6 +839,7 @@ struct ContentView: View {
         if !query.isEmpty {
             switch mode {
             case .active:   return store.sessions.filter { !$0.archived && matches($0) }.sorted(by: Self.byPriority)
+            case .live:     return liveList.filter(matches)
             case .stale:    return staleList.filter(matches).sorted { $0.idle_h < $1.idle_h }
             case .archived: return archivedList.filter(matches).sorted(by: Self.byPriority)
             }
@@ -841,6 +851,7 @@ struct ContentView: View {
                 for f in folders where !collapsed.contains(f.name) { arr += f.items }
             } else { arr += flatList }
             return arr
+        case .live:     return liveList
         case .stale:    return staleExpanded ? staleList.sorted { $0.idle_h < $1.idle_h } : []
         case .archived: return archivedList.sorted(by: Self.byPriority)
         }
@@ -944,7 +955,7 @@ struct ContentView: View {
     }
 
     enum Mode: String, CaseIterable, Identifiable {
-        case active = "会话", stale = "陈旧", archived = "已归档"
+        case active = "会话", live = "活跃", stale = "陈旧", archived = "已归档"
         var id: Self { self }
     }
 
@@ -959,6 +970,13 @@ struct ContentView: View {
     }
     private var staleList: [Session] { store.sessions.filter { !$0.archived && !$0.pinned && $0.isStale } }
     private var archivedList: [Session] { store.sessions.filter(\.archived) }
+    // 活跃 tab: every session with a terminal open RIGHT NOW — embedded in-app
+    // (TerminalManager.running) or an external claude REPL scan identified (alive).
+    // No archived/stale filtering: a live terminal trumps every other state.
+    private var liveList: [Session] {
+        store.sessions.filter { term.running.contains($0.full_sid) || $0.alive }
+            .sorted { $0.idle_h < $1.idle_h }
+    }
     private var folders: [(name: String, items: [Session])] {
         let rest = store.sessions.filter { !$0.archived && !$0.pinned && !$0.isStale }
         return Dictionary(grouping: rest, by: \.repo)
@@ -1266,6 +1284,7 @@ struct ContentView: View {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         switch mode {
                         case .active: activeContent
+                        case .live: liveContent
                         case .stale: staleContent
                         case .archived: archivedContent
                         }
@@ -1327,6 +1346,20 @@ struct ContentView: View {
             onPin: { store.setPinned(s, !s.pinned) }, onRename: { beginRename(s) },
             onMarkUnread: { store.setUnread(s, !s.unread) },
             selected: selectedID == s.id, hoveredID: $hoveredID)
+    }
+
+    @ViewBuilder private var liveContent: some View {
+        let items = liveList.filter(matches)
+        if items.isEmpty {
+            ContentUnavailableView(query.isEmpty ? "没有活跃会话" : "无匹配会话",
+                systemImage: "terminal",
+                description: Text(query.isEmpty ? "开着终端的会话(App 内嵌入运行,或外部 kitty/终端里的 claude)会出现在这里" : ""))
+                .padding(.top, 40)
+        } else {
+            SectionHeader(title: query.isEmpty ? "活跃" : "搜索结果", n: items.count,
+                          icon: query.isEmpty ? "terminal" : "magnifyingglass")
+            ForEach(items) { s in sessionRow(s) }
+        }
     }
 
     @ViewBuilder private var staleContent: some View {

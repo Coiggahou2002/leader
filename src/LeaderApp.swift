@@ -13,7 +13,6 @@ enum DS {
     static let corner: CGFloat = 9
     static let panelWidth: CGFloat = 320
     static let archiveZone: CGFloat = 30   // trailing hit-zone: archive
-    static let pinZone: CGFloat = 30       // next hit-zone: pin/unpin
 }
 
 // Flat, opaque sidebar fill (Codex-style). Solid so it reads uniform all the way
@@ -54,6 +53,7 @@ struct Session: Decodable, Identifiable {
     let alive: Bool
     var archived: Bool      // var: allows optimistic local toggle
     var pinned: Bool
+    var unread: Bool = false   // manually marked unread (red "1" badge); default keeps old data decodable
     var nickname: String?
     var id: String { full_sid }
 
@@ -67,7 +67,6 @@ struct Session: Decodable, Identifiable {
                            .replacingOccurrences(of: home + "/", with: "~/")
     }
     var ago: String { idle_h < 48 ? "\(Int(idle_h.rounded()))h" : "\(Int((idle_h/24).rounded()))d" }
-    var tok: String { out_tok >= 1000 ? "\(out_tok/1000)k" : "\(out_tok)" }
     var needsAttention: Bool { bucket == "a" }
     var isStale: Bool { idle_h >= 15 * 24 }     // 最后消息 ≥ 15 天
     static let order = ["a": 0, "b": 1, "c": 2]
@@ -111,6 +110,9 @@ enum Backend {
     }
     static func setPinned(_ s: Session, _ on: Bool) {
         _ = run(["\(dir)/pin.py", on ? "add" : "remove", s.full_sid])
+    }
+    static func setUnread(_ s: Session, _ on: Bool) {
+        _ = run(["\(dir)/unread.py", on ? "add" : "remove", s.full_sid])
     }
     static func setNickname(_ s: Session, _ nick: String) {
         let trimmed = nick.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -203,6 +205,14 @@ final class Store {
         flash(on ? "已置顶" : "已取消置顶")
         Task.detached(priority: .userInitiated) {
             Backend.setPinned(s, on)
+            await MainActor.run { self.epoch += 1; self.refresh() }   // invalidate scans started before this write landed
+        }
+    }
+    func setUnread(_ s: Session, _ on: Bool) {
+        optimistic(s.id) { $0.unread = on }
+        flash(on ? "已标为未读" : "已标为已读")
+        Task.detached(priority: .userInitiated) {
+            Backend.setUnread(s, on)
             await MainActor.run { self.epoch += 1; self.refresh() }   // invalidate scans started before this write landed
         }
     }
@@ -343,19 +353,59 @@ final class Activity: ObservableObject {
     }
 }
 
-// A tiny spinning arc shown in place of the status dot while a session is actively
-// reasoning (between UserPromptSubmit and Stop). Sized to the 8px dot slot.
-struct SpinnerDot: View {
-    @State private var spin = false
+// ChatGPT "Working…"-style shimmer for a session that is reasoning right now
+// (UserPromptSubmit..Stop): the title dims and a bright band sweeps left→right.
+// Replaces the old spinner dot / green terminal icon as the "in progress" signal.
+struct WorkingShimmer: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func body(content: Content) -> some View {
+        if reduceMotion {
+            content.opacity(0.6)          // still visibly "working", just no sweep
+        } else {
+            content
+                .opacity(0.45)            // dimmed base; the band restores full brightness
+                .overlay {
+                    // Time-driven (not onAppear+repeatForever): LazyVStack re-fires
+                    // onAppear with @State already at its end value, freezing the
+                    // sweep; a TimelineView phase is stateless and always correct.
+                    TimelineView(.animation) { tl in
+                        GeometryReader { geo in
+                            let t = tl.date.timeIntervalSinceReferenceDate
+                            // 1.4s cycle, band sweeps -0.7W → 1.2W with a short
+                            // fully-off pause between passes (ChatGPT-like).
+                            let phase = CGFloat((t / 1.4).truncatingRemainder(dividingBy: 1)) * 1.9 - 0.7
+                            LinearGradient(stops: [
+                                .init(color: .clear, location: 0),
+                                .init(color: .primary, location: 0.5),
+                                .init(color: .clear, location: 1),
+                            ], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: max(geo.size.width * 0.55, 40))
+                            .offset(x: phase * geo.size.width)
+                        }
+                    }
+                    .mask(content)
+                    .allowsHitTesting(false)
+                }
+        }
+    }
+}
+extension View {
+    // Structural if: identity changes when `active` flips, so the repeatForever
+    // animation starts fresh on activation and is fully torn down on stop.
+    @ViewBuilder func workingShimmer(_ active: Bool) -> some View {
+        if active { modifier(WorkingShimmer()) } else { self }
+    }
+}
+
+// Red "1" badge for a manually-marked-unread session (email-style unread count).
+struct UnreadBadge: View {
     var body: some View {
-        Circle()
-            .trim(from: 0, to: 0.7)
-            .stroke(Color.green, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
-            .frame(width: 8, height: 8)
-            .rotationEffect(.degrees(spin ? 360 : 0))
-            .animation(.linear(duration: 0.8).repeatForever(autoreverses: false), value: spin)
-            .onAppear { spin = true }
-            .help("正在推理…")
+        Text("1")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 15, height: 15)
+            .background(Circle().fill(.red))
+            .help("未读(右键可标记已读;打开即自动已读)")
     }
 }
 
@@ -437,21 +487,59 @@ final class MouseNSView: NSView {
     var onArchive: () -> Void = {}
     var onPin: () -> Void = {}
     var onRename: () -> Void = {}
-    var hasPinZone = true
+    var onMarkUnread: () -> Void = {}
+    var canPin = true              // gates the 置顶 context-menu item
+    // context-menu state (right-click)
+    var contextMenuEnabled = true
+    var isPinned = false
+    var isUnread = false
+    var canUnread = true
+    var archiveTitle = "归档"
     var onHover: (Bool) -> Void = { _ in }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) {
         let x = convert(event.locationInWindow, from: nil).x
         if x > bounds.width - DS.archiveZone { onArchive() }
-        else if hasPinZone, x > bounds.width - DS.archiveZone - DS.pinZone { onPin() }
         else { onClick() }
     }
-    override func rightMouseDown(with event: NSEvent) { onRename() }
+    // Right-click -> a proper context menu (previously this was a bare rename).
+    override func rightMouseDown(with event: NSEvent) {
+        guard contextMenuEnabled else { return }
+        let menu = NSMenu()
+        if canUnread {
+            let u = NSMenuItem(title: isUnread ? "标记已读" : "标记未读",
+                               action: #selector(miUnread), keyEquivalent: "")
+            u.target = self; menu.addItem(u); menu.addItem(.separator())
+        }
+        let r = NSMenuItem(title: "重命名", action: #selector(miRename), keyEquivalent: "")
+        r.target = self; menu.addItem(r)
+        if canPin {
+            let p = NSMenuItem(title: isPinned ? "取消置顶" : "置顶",
+                               action: #selector(miPin), keyEquivalent: "")
+            p.target = self; menu.addItem(p)
+        }
+        let a = NSMenuItem(title: archiveTitle, action: #selector(miArchive), keyEquivalent: "")
+        a.target = self; menu.addItem(a)
+        menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)
+    }
+    @objc private func miRename() { onRename() }
+    @objc private func miPin() { onPin() }
+    @objc private func miUnread() { onMarkUnread() }
+    @objc private func miArchive() { onArchive() }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(rect: bounds,
             options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        // Rows move UNDER a stationary pointer (scroll, pin/refresh reorder) with no
+        // entered/exited events, leaving a stale hover highlight on the old row.
+        // AppKit re-invokes this on geometry changes, so reconcile against the real
+        // pointer position — the row no longer under the pointer clears itself.
+        // Async: this can run mid-layout, and onHover mutates SwiftUI state.
+        if let w = window {
+            let inside = bounds.contains(convert(w.mouseLocationOutsideOfEventStream, from: nil))
+            DispatchQueue.main.async { [weak self] in self?.onHover(inside) }
+        }
     }
     override func mouseEntered(with event: NSEvent) { onHover(true) }
     override func mouseExited(with event: NSEvent) { onHover(false) }
@@ -461,18 +549,23 @@ struct MouseLayer: NSViewRepresentable {
     var onArchive: () -> Void = {}
     var onPin: () -> Void = {}
     var onRename: () -> Void = {}
-    var hasPinZone = false
+    var onMarkUnread: () -> Void = {}
+    var canPin = false
+    var contextMenuEnabled = true
+    var isPinned = false
+    var isUnread = false
+    var canUnread = true
+    var archiveTitle = "归档"
     var onHover: (Bool) -> Void = { _ in }
-    func makeNSView(context: Context) -> MouseNSView {
-        let v = MouseNSView()
+    private func apply(_ v: MouseNSView) {
         v.onClick = onClick; v.onArchive = onArchive; v.onPin = onPin
-        v.onRename = onRename; v.hasPinZone = hasPinZone; v.onHover = onHover
-        return v
+        v.onRename = onRename; v.onMarkUnread = onMarkUnread
+        v.canPin = canPin; v.contextMenuEnabled = contextMenuEnabled
+        v.isPinned = isPinned; v.isUnread = isUnread; v.canUnread = canUnread
+        v.archiveTitle = archiveTitle; v.onHover = onHover
     }
-    func updateNSView(_ v: MouseNSView, context: Context) {
-        v.onClick = onClick; v.onArchive = onArchive; v.onPin = onPin
-        v.onRename = onRename; v.hasPinZone = hasPinZone; v.onHover = onHover
-    }
+    func makeNSView(context: Context) -> MouseNSView { let v = MouseNSView(); apply(v); return v }
+    func updateNSView(_ v: MouseNSView, context: Context) { apply(v) }
 }
 
 extension Notification.Name {
@@ -585,43 +678,41 @@ struct Row: View {
     let onArchive: () -> Void
     var onPin: () -> Void = {}
     var onRename: () -> Void = {}
+    var onMarkUnread: () -> Void = {}
     var showPin: Bool = true
+    var canUnread: Bool = true
+    var archiveTitle: String = "归档"
     var selected: Bool = false
     @Binding var hoveredID: String?
     @ObservedObject var term = TerminalManager.shared   // embed state (running/exited)
     @ObservedObject var activity = Activity.shared       // turn-completion pulse
     // single shared hovered id -> at most one row highlights, even mid-scroll
     private var hover: Bool { hoveredID == s.id }
-    private var dotColor: Color { s.needsAttention ? .red : (s.alive ? .green : .secondary) }
-    // embedded-terminal badge: filled+green while the in-app claude runs, hollow
-    // grey once it exits, nothing if the session was never embedded.
+    // embedded-terminal badge: filled while the in-app claude process is alive,
+    // hollow once it exits, nothing if never embedded. Quiet grey either way —
+    // "actively working" is signalled by the title shimmer, not by color here.
     private var embedSymbol: String? {
         if term.running.contains(s.full_sid) { return "terminal.fill" }
         if term.exited.contains(s.full_sid) { return "terminal" }
         return nil
     }
-    private var embedColor: Color { term.running.contains(s.full_sid) ? .green : .secondary }
+    // Guard on s.alive so a crashed session (no Stop event) can't shimmer forever.
+    private var isWorking: Bool { activity.running.contains(s.full_sid) && s.alive }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: DS.gap + 3) {
-            Group {
-                // Actively reasoning -> spinner; else the red/green/grey status dot.
-                // Guard on s.alive so a crashed session (no Stop) can't spin forever.
-                if activity.running.contains(s.full_sid) && s.alive { SpinnerDot() }
-                else { Circle().fill(dotColor).frame(width: 7, height: 7) }
-            }
-            .frame(width: 8, height: 8)
-            .alignmentGuide(.firstTextBaseline) { d in d[.bottom] - 2 }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(s.name).font(.callout).bold().lineLimit(1)
+                        .workingShimmer(isWorking)
+                    if s.unread { UnreadBadge() }
                     if let sym = embedSymbol {
-                        Image(systemName: sym).font(.caption2).foregroundStyle(embedColor)
+                        Image(systemName: sym).font(.caption2).foregroundStyle(.secondary)
                             .help(sym == "terminal.fill" ? "已嵌入运行" : "已嵌入(进程已退出)")
                     }
                     if activity.attention.contains(s.full_sid) { BreathingDot() }
                 }
-                Text("\(s.repo)@\(s.branch ?? "?") · \(s.ago)前 · \(s.msgs)条/\(s.tok)")
+                Text("\(s.ago)前 · \(s.repo)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 if s.needsAttention, !s.why.isEmpty {
                     Text(s.why.joined(separator: " · "))
@@ -629,20 +720,14 @@ struct Row: View {
                 }
             }
             Spacer(minLength: 0)
-            HStack(spacing: 6) {
-                if showPin {
-                    Image(systemName: s.pinned ? "star.fill" : "star")
-                        .foregroundStyle(s.pinned ? AnyShapeStyle(.yellow) : AnyShapeStyle(.secondary))
-                        .frame(width: 18)
-                        .opacity(s.pinned ? 1 : (hover ? 1 : 0.3))
-                        .help(s.pinned ? "取消置顶" : "置顶")
-                }
-                Image(systemName: archiveSymbol).foregroundStyle(.secondary)
-                    .frame(width: 18)
-                    .opacity(hover ? 1 : 0.32)
-                    .help(archiveSymbol == "archivebox" ? "归档" : "取消归档")
-            }
-            .font(.caption)
+            // Archive is a deliberate action: keep it out of sight until the row is
+            // hovered. The trailing hit-zone still works — clicking requires the
+            // pointer to be on the row, which is exactly when the icon is visible.
+            Image(systemName: archiveSymbol).foregroundStyle(.secondary)
+                .frame(width: 18)
+                .font(.caption)
+                .opacity(hover ? 1 : 0)
+                .help(archiveSymbol == "archivebox" ? "归档" : "取消归档")
         }
         .padding(.vertical, DS.rowPadV).padding(.horizontal, DS.rowPadH)
         .frame(minHeight: 36)
@@ -651,7 +736,9 @@ struct Row: View {
                            : (hover ? AnyShapeStyle(Color.primary.opacity(0.06)) : AnyShapeStyle(.clear))))
         .contentShape(RoundedRectangle(cornerRadius: DS.corner))
         .overlay { MouseLayer(onClick: onOpen, onArchive: onArchive, onPin: onPin,
-                              onRename: onRename, hasPinZone: showPin, onHover: { inside in
+                              onRename: onRename, onMarkUnread: onMarkUnread,
+                              canPin: showPin, isPinned: s.pinned, isUnread: s.unread,
+                              canUnread: canUnread, archiveTitle: archiveTitle, onHover: { inside in
             if inside { hoveredID = s.id } else if hoveredID == s.id { hoveredID = nil }
         }) }
         .accessibilityElement(children: .combine)
@@ -666,9 +753,13 @@ struct SectionHeader: View {
     let title: String
     let n: Int
     var icon: String?
+    var iconTint: Color?    // e.g. the single golden star on the 置顶 header
     var body: some View {
         HStack(spacing: 4) {
-            if let icon { Image(systemName: icon).font(.caption2) }
+            if let icon {
+                Image(systemName: icon).font(.caption2)
+                    .foregroundStyle(iconTint.map(AnyShapeStyle.init) ?? AnyShapeStyle(.tertiary))
+            }
             Text(title).lineLimit(1)
             Text("\(n)").foregroundStyle(.quaternary)
         }
@@ -697,7 +788,7 @@ struct FolderHeader: View {
         .padding(.top, 13).padding(.bottom, 3).padding(.horizontal, DS.rowPadH)
         .frame(minHeight: 26)
         .contentShape(Rectangle())
-        .overlay { MouseLayer(onClick: toggle, onArchive: toggle, onHover: { _ in }) }
+        .overlay { MouseLayer(onClick: toggle, onArchive: toggle, contextMenuEnabled: false, onHover: { _ in }) }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("\(title) 文件夹,\(n) 个会话")
@@ -771,6 +862,7 @@ struct ContentView: View {
     private func openEmbedded(_ s: Session) {
         selectedID = s.id
         activeSID = s.id
+        if s.unread { store.setUnread(s, false) }   // 打开即已读(邮件式)
     }
     // "+": start a fresh session embedded right here. We mint the sid so there's no
     // race to discover it; claude --session-id starts the conversation at that id.
@@ -897,7 +989,10 @@ struct ContentView: View {
         .overlay { openPathPanel }
         .frame(minWidth: 820, minHeight: 480)
         .onAppear { store.start(); Activity.shared.start(); focus = .list; updateQuakeCwd() }
-        .onChange(of: activeSID) { _, id in updateQuakeCwd(); Activity.shared.markFocused(id) }
+        .onChange(of: activeSID) { _, id in
+            updateQuakeCwd(); Activity.shared.markFocused(id)
+            hoveredID = nil   // switch kills any stale hover on the previous row
+        }
         .sheet(item: $renameTarget) { s in
             RenameSheet(session: s, text: $renameText,
                         onSave: { store.setNickname(s, $0); renameTarget = nil },
@@ -1089,18 +1184,41 @@ struct ContentView: View {
         .background(.bar)
     }
 
-    // Empty strip reserving room for the window's traffic lights (which sit at the
-    // sidebar's top-left, Codex-style). Draggable as a titlebar substitute.
+    // Top strip: reserves room for the window's traffic lights (which sit at the
+    // sidebar's top-left) and shows the Claude logo just to their right.
     private var trafficInset: some View {
-        Color.clear.frame(height: 30)
+        VStack(alignment: .leading, spacing: 0) {
+            Color.clear.frame(height: 26)        // room for the floating traffic lights
+            if let logo = Self.claudeLogo {
+                Image(nsImage: logo).resizable().interpolation(.high)
+                    .scaledToFit().frame(height: 36)
+                    .padding(.leading, DS.gap + DS.rowPadH - 2)   // align with list content
+                    .padding(.bottom, 16)                          // breathing room above the search box
+            }
+        }
     }
+    // Bundled brand mark (Contents/Resources/claude-logo.png), loaded once and
+    // pre-downsampled with high-quality interpolation. The source is 1000px; the
+    // starburst's fine spokes alias badly if SwiftUI does the whole ~14× shrink at
+    // draw time, so we bake it down to ~display resolution (36pt @3× = 108px) once.
+    static let claudeLogo: NSImage? = {
+        guard let p = Bundle.main.resourcePath,
+              let src = NSImage(contentsOfFile: p + "/claude-logo.png") else { return nil }
+        let side: CGFloat = 108
+        let out = NSImage(size: NSSize(width: side, height: side))
+        out.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        src.draw(in: NSRect(x: 0, y: 0, width: side, height: side),
+                 from: NSRect(origin: .zero, size: src.size),
+                 operation: .copy, fraction: 1)
+        out.unlockFocus()
+        return out
+    }()
 
     // Utility strip pinned to the sidebar bottom (Codex puts the account row here).
     private var bottomBar: some View {
         HStack(spacing: 10) {
             if store.loading { ProgressView().controlSize(.small) }
-            Text("\(attention.count) 待处理 · \(archivedList.count) 归档")
-                .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
             Spacer(minLength: 4)
             iconButton("arrow.clockwise", "刷新", Color.secondary, action: store.refresh)
             iconButton(grouped ? "folder.fill" : "clock",
@@ -1156,6 +1274,12 @@ struct ContentView: View {
             .onChange(of: selectedID) { _, id in
                 if let id { withAnimation(.easeInOut(duration: 0.12)) { proxy.scrollTo(id, anchor: .center) } }
             }
+            // Kill stuck hover: rows live in a LazyVStack, so a hovered row that
+            // scrolls off (or the pointer leaving into the terminal pane / out the
+            // window) can miss its per-row mouseExited, leaving hoveredID pinned on
+            // it. Clearing when the pointer leaves the whole list guarantees that at
+            // rest only the selected row stays highlighted.
+            .onHover { inside in if !inside { hoveredID = nil } }
         }
     }
 
@@ -1171,7 +1295,8 @@ struct ContentView: View {
             }
         } else {
             if !pinnedList.isEmpty {
-                SectionHeader(title: "置顶", n: pinnedList.count, icon: "star.fill")
+                // The one golden star lives here; rows stay clean (pin/unpin via 右键).
+                SectionHeader(title: "置顶", n: pinnedList.count, icon: "star.fill", iconTint: .yellow)
                 ForEach(pinnedList) { s in sessionRow(s) }
             }
             if grouped {
@@ -1201,6 +1326,7 @@ struct ContentView: View {
         Row(s: s, archiveSymbol: "archivebox",
             onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, true) },
             onPin: { store.setPinned(s, !s.pinned) }, onRename: { beginRename(s) },
+            onMarkUnread: { store.setUnread(s, !s.unread) },
             selected: selectedID == s.id, hoveredID: $hoveredID)
     }
 
@@ -1236,7 +1362,8 @@ struct ContentView: View {
             ForEach(items) { s in
                 Row(s: s, archiveSymbol: "tray.and.arrow.up",
                     onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, false) },
-                    onRename: { beginRename(s) }, showPin: false,
+                    onRename: { beginRename(s) }, showPin: false, canUnread: false,
+                    archiveTitle: "取消归档",
                     selected: selectedID == s.id, hoveredID: $hoveredID)
             }
         }

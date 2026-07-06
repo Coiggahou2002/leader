@@ -46,7 +46,6 @@ struct Session: Decodable, Identifiable {
     let resume_cwd: String?   // dir `claude --resume` must run from (scan.py)
     let branch: String?
     let bucket: String
-    let why: [String]
     let idle_h: Double
     let msgs: Int
     let out_tok: Int
@@ -67,7 +66,6 @@ struct Session: Decodable, Identifiable {
                            .replacingOccurrences(of: home + "/", with: "~/")
     }
     var ago: String { idle_h < 48 ? "\(Int(idle_h.rounded()))h" : "\(Int((idle_h/24).rounded()))d" }
-    var needsAttention: Bool { bucket == "a" }
     var isStale: Bool { idle_h >= 15 * 24 }     // 最后消息 ≥ 15 天
     static let order = ["a": 0, "b": 1, "c": 2]
 }
@@ -714,10 +712,6 @@ struct Row: View {
                 }
                 Text("\(s.ago)前 · \(s.repo)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                if s.needsAttention, !s.why.isEmpty {
-                    Text(s.why.joined(separator: " · "))
-                        .font(.caption).foregroundStyle(.orange).lineLimit(2)
-                }
             }
             Spacer(minLength: 0)
             // Archive is a deliberate action: keep it out of sight until the row is
@@ -838,7 +832,6 @@ struct ContentView: View {
         case .active:
             var arr = pinnedList
             if grouped {
-                arr += attention
                 for f in folders where !collapsed.contains(f.name) { arr += f.items }
             } else { arr += flatList }
             return arr
@@ -953,11 +946,10 @@ struct ContentView: View {
     private var pinnedList: [Session] {
         store.sessions.filter { $0.pinned && !$0.archived }.sorted(by: Self.byPriority)
     }
-    private var attention: [Session] { store.sessions.filter { !$0.archived && !$0.pinned && !$0.isStale && $0.bucket == "a" } }
     private var staleList: [Session] { store.sessions.filter { !$0.archived && !$0.pinned && $0.isStale } }
     private var archivedList: [Session] { store.sessions.filter(\.archived) }
     private var folders: [(name: String, items: [Session])] {
-        let rest = store.sessions.filter { !$0.archived && !$0.pinned && !$0.isStale && $0.bucket != "a" }
+        let rest = store.sessions.filter { !$0.archived && !$0.pinned && !$0.isStale }
         return Dictionary(grouping: rest, by: \.repo)
             .map { (name: $0.key, items: $0.value.sorted(by: Self.byPriority)) }
             .sorted { $0.name < $1.name }
@@ -1300,10 +1292,6 @@ struct ContentView: View {
                 ForEach(pinnedList) { s in sessionRow(s) }
             }
             if grouped {
-                if !attention.isEmpty {
-                    SectionHeader(title: "需处理", n: attention.count)
-                    ForEach(attention) { s in sessionRow(s) }
-                }
                 ForEach(folders, id: \.name) { folder in
                     let isCollapsed = collapsed.contains(folder.name)
                     FolderHeader(title: folder.name, n: folder.items.count, collapsed: isCollapsed) {

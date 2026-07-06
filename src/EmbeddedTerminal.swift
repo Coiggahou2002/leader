@@ -304,7 +304,7 @@ final class TerminalManager: ObservableObject {
         tv.startProcess(executable: "/bin/zsh", args: ["-lc", resumeCommand(sid: sid)],
                         environment: termCleanEnv(), currentDirectory: expandTilde(cwd))
         views[sid] = tv
-        running.insert(sid); exited.remove(sid)
+        markRunningDeferred(sid)
         return tv
     }
     // Start a brand-new session at a caller-chosen sid (no --resume). If a view for
@@ -320,8 +320,20 @@ final class TerminalManager: ObservableObject {
         tv.startProcess(executable: "/bin/zsh", args: ["-lc", newSessionCommand(sid: sid)],
                         environment: termCleanEnv(), currentDirectory: expandTilde(cwd))
         views[sid] = tv
-        running.insert(sid); exited.remove(sid)
+        markRunningDeferred(sid)
         return tv
+    }
+    // terminal(forSid:)/newSession are called from TerminalContainer.updateNSView —
+    // i.e. MID view update. Mutating @Published there is SwiftUI undefined behavior
+    // ("Publishing changes from within view updates"): the transaction's other
+    // invalidations get dropped — concretely, clicking a not-yet-open session
+    // switched the terminal pane but the sidebar row highlight never moved.
+    // Defer the publish to the next runloop tick, outside the render pass.
+    private func markRunningDeferred(_ sid: String) {
+        DispatchQueue.main.async {
+            guard self.views[sid] != nil else { return }   // closed before the tick landed
+            self.running.insert(sid); self.exited.remove(sid)
+        }
     }
     func isOpen(_ sid: String) -> Bool { views[sid] != nil }
     func close(_ sid: String) {

@@ -18,7 +18,6 @@ import config
 
 # ---- tunable thresholds (the priority rules, in one place) -----------------
 CONFIG = {
-    "ball_fresh_h": 24,      # assistant waiting & younger than this -> (a)
     "limbo_min_h": 2,        # dirty/unpushed & idle at least this   -> (a)
     "limbo_max_h": 24,       #            ... but not older than this
     "canwait_days": 7,       # younger than this & clean             -> (b)
@@ -240,8 +239,9 @@ def classify(d: dict, wt: dict | None) -> tuple[str, list[str]]:
         return "c", [f"空会话({d['msgs']}条) + {idle_d:.0f}d 没动"]
 
     # (a) needs you ----------------------------------------------------------
-    if ball_in_your_court and idle_h <= c["ball_fresh_h"]:
-        why.append("答完在等你")
+    # NOTE: "answered & waiting on you" (ball_in_your_court + fresh) used to
+    # promote to (a) here — dropped: it fired on nearly every session whose
+    # last turn ended in a question, flooding 需处理 with noise.
     if ahead > 0 and c["limbo_min_h"] <= idle_h <= c["limbo_max_h"]:
         why.append(f"{ahead} 个 commit 没 push")
     if d["bad_tail"]:

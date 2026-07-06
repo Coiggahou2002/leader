@@ -249,13 +249,21 @@ def _flag_set(name: str) -> set:
     except Exception:
         return set()
 
+def _flag_list(name: str) -> list:
+    """Like _flag_set but ORDER-PRESERVING (pinned.json is ordered by pin time)."""
+    try:
+        return list(json.load(open(config.data_file(f"{name}.json"))).get("sids", []))
+    except Exception:
+        return []
+
 def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
     wt_all = {}
     for repo in config.worktree_repos():
         wt_all.update(worktrees(repo))
     sid2tty, cwd2ttys = live_map()
     archived = _flag_set("archived")
-    pinned = _flag_set("pinned")
+    # pin order = position in pinned.json (pin time); drives the stable 置顶 sort
+    pin_idx = {sid: i for i, sid in enumerate(_flag_list("pinned"))}
     unread = _flag_set("unread")
     try:
         names = json.load(open(config.data_file("names.json")))
@@ -282,8 +290,8 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
             where = "⚪ 已关"
         d.update(bucket=bucket, why=why, wt=wt, full_sid=full_sid,
                  alive=alive, where=where, archived=full_sid in archived,
-                 pinned=full_sid in pinned, unread=full_sid in unread,
-                 nickname=names.get(full_sid))
+                 pinned=full_sid in pin_idx, pin_order=pin_idx.get(full_sid),
+                 unread=full_sid in unread, nickname=names.get(full_sid))
         sessions.append(d)
 
     home = os.path.expanduser("~")

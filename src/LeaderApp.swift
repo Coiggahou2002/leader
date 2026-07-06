@@ -52,6 +52,10 @@ struct Session: Decodable, Identifiable {
     let alive: Bool
     var archived: Bool      // var: allows optimistic local toggle
     var pinned: Bool
+    // Position in pinned.json (= pin time). The 置顶 section sorts by this so
+    // pinned rows never reshuffle with activity. nil (e.g. an optimistic pin
+    // before the next scan) sorts last, matching pin.py's append-on-add.
+    var pin_order: Int?
     var unread: Bool = false   // manually marked unread (red "1" badge); default keeps old data decodable
     var nickname: String?
     var id: String { full_sid }
@@ -671,15 +675,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Row
 struct Row: View {
     let s: Session
-    let archiveSymbol: String
     let onOpen: () -> Void
     let onArchive: () -> Void
     var onPin: () -> Void = {}
     var onRename: () -> Void = {}
     var onMarkUnread: () -> Void = {}
-    var showPin: Bool = true
-    var canUnread: Bool = true
-    var archiveTitle: String = "归档"
     var selected: Bool = false
     @Binding var hoveredID: String?
     @ObservedObject var term = TerminalManager.shared   // embed state (running/exited)
@@ -696,6 +696,12 @@ struct Row: View {
     }
     // Guard on s.alive so a crashed session (no Stop event) can't shimmer forever.
     private var isWorking: Bool { activity.running.contains(s.full_sid) && s.alive }
+    // Archive affordances derive from the session's own state — never passed in
+    // by the surrounding list, so a row can't show 取消归档 after it moved back
+    // to the active tab (or vice versa). Pin/unread only make sense un-archived.
+    private var archiveSymbol: String { s.archived ? "tray.and.arrow.up" : "archivebox" }
+    private var archiveTitle: String { s.archived ? "取消归档" : "归档" }
+    private var canPinOrUnread: Bool { !s.archived }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: DS.gap + 3) {
@@ -721,7 +727,7 @@ struct Row: View {
                 .frame(width: 18)
                 .font(.caption)
                 .opacity(hover ? 1 : 0)
-                .help(archiveSymbol == "archivebox" ? "归档" : "取消归档")
+                .help(archiveTitle)
         }
         .padding(.vertical, DS.rowPadV).padding(.horizontal, DS.rowPadH)
         .frame(minHeight: 36)
@@ -731,8 +737,8 @@ struct Row: View {
         .contentShape(RoundedRectangle(cornerRadius: DS.corner))
         .overlay { MouseLayer(onClick: onOpen, onArchive: onArchive, onPin: onPin,
                               onRename: onRename, onMarkUnread: onMarkUnread,
-                              canPin: showPin, isPinned: s.pinned, isUnread: s.unread,
-                              canUnread: canUnread, archiveTitle: archiveTitle, onHover: { inside in
+                              canPin: canPinOrUnread, isPinned: s.pinned, isUnread: s.unread,
+                              canUnread: canPinOrUnread, archiveTitle: archiveTitle, onHover: { inside in
             if inside { hoveredID = s.id } else if hoveredID == s.id { hoveredID = nil }
         }) }
         .accessibilityElement(children: .combine)
@@ -942,9 +948,14 @@ struct ContentView: View {
         var id: Self { self }
     }
 
-    // pinned overrides stale (user explicitly wants it handy)
+    // pinned overrides stale (user explicitly wants it handy).
+    // Fixed order = pin time (pin_order), NOT recency — a pinned row must never
+    // drift when scans update idle times. sid tiebreak keeps ties deterministic.
     private var pinnedList: [Session] {
-        store.sessions.filter { $0.pinned && !$0.archived }.sorted(by: Self.byPriority)
+        store.sessions.filter { $0.pinned && !$0.archived }.sorted {
+            let (a, b) = ($0.pin_order ?? .max, $1.pin_order ?? .max)
+            return a == b ? $0.full_sid < $1.full_sid : a < b
+        }
     }
     private var staleList: [Session] { store.sessions.filter { !$0.archived && !$0.pinned && $0.isStale } }
     private var archivedList: [Session] { store.sessions.filter(\.archived) }
@@ -1311,8 +1322,8 @@ struct ContentView: View {
     }
 
     private func sessionRow(_ s: Session) -> some View {
-        Row(s: s, archiveSymbol: "archivebox",
-            onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, true) },
+        Row(s: s,
+            onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, !s.archived) },
             onPin: { store.setPinned(s, !s.pinned) }, onRename: { beginRename(s) },
             onMarkUnread: { store.setUnread(s, !s.unread) },
             selected: selectedID == s.id, hoveredID: $hoveredID)
@@ -1348,10 +1359,9 @@ struct ContentView: View {
                 .padding(.top, 40)
         } else {
             ForEach(items) { s in
-                Row(s: s, archiveSymbol: "tray.and.arrow.up",
-                    onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, false) },
-                    onRename: { beginRename(s) }, showPin: false, canUnread: false,
-                    archiveTitle: "取消归档",
+                Row(s: s,
+                    onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, !s.archived) },
+                    onRename: { beginRename(s) },
                     selected: selectedID == s.id, hoveredID: $hoveredID)
             }
         }

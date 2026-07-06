@@ -1,60 +1,114 @@
-# Leader — a context-switching cockpit for many Claude Code sessions
+<div align="center">
 
-When you run lots of Claude Code sessions across many folders / git worktrees /
-repos, you lose track of what's open and what needs you — and the desktop fills
-with terminal windows. **Leader** is a native macOS **cockpit**: a resizable
-window with a session **sidebar** on the left and an **embedded terminal** on
-the right that runs the actual `claude` session *inside the app*. No more window
-pile. It lets you:
+# ✈️ Leader
 
-- see every session bucketed into **需处理 / 最近 / 陈旧 / 已归档**
-- **click a session → it runs embedded** in the main area (`claude --resume`);
-  opened sessions stay alive in the background for instant switching
-- a per-session **close** button kills that embedded process but keeps the list
-  item; an **open in kitty window** button is the escape hatch (e.g. for
-  `/tui fullscreen`, which doesn't scroll cleanly when embedded)
-- a session that is **actively reasoning shimmers**: its title dims and a bright
-  band sweeps across it (ChatGPT "Working…"-style); a quiet grey **embed badge**
-  marks rows whose in-app claude process is alive (filled) or has exited (hollow)
-- **pin** frequently-used sessions via right-click — they gather under a 置顶
-  section with a single golden star on the header; **archive** (icon appears on
-  hover) ones you're done with, **rename** any session (a Leader-only nickname),
-  **search** by title / folder / last message, group by folder or sort by recency
-- **+** to start a brand-new session embedded right here — the session id is
-  minted up front (`claude --session-id`), so there's no race to find it
-- the window is normal-level by default; a **pin** toolbar button toggles
-  always-on-top when you want it
+**A native macOS cockpit for flying many Claude Code sessions at once — without the terminal-window pile.**
 
-It's a SwiftUI shell embedding [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)
-over a few read-only Python scripts. Conversation data is never modified — Leader
-only reads `~/.claude/projects/*` and manages its own small state files. The
-embedded `claude` runs with `CLAUDE_CODE_*` / `CODEX_COMPANION_*` stripped from
-its environment, so it persists its own transcript instead of nesting as a child.
+![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-blue)
+![Swift](https://img.shields.io/badge/Swift-SwiftUI%20%2B%20SwiftTerm-orange)
+![Backend](https://img.shields.io/badge/backend-read--only%20Python-green)
+![License](https://img.shields.io/badge/license-TBD-lightgrey)
 
-## Requirements
+*One window. Every session. Click to switch.*
 
-- macOS 14+ (Apple Silicon or Intel — you build it locally)
-- Xcode Command Line Tools (`swiftc`) — `xcode-select --install`
-- [kitty](https://sw.kovidgoyal.net/kitty/) terminal — `brew install --cask kitty`
-  (optional now — only the "open in kitty window" escape hatch uses it)
-- Claude Code (`claude` on your `PATH`)
+</div>
+
+<!-- Drop a screenshot at docs/screenshot.png and uncomment:
+<p align="center"><img src="docs/screenshot.png" width="800" alt="Leader main window"></p>
+-->
+
+---
+
+## Why
+
+If you run Claude Code seriously, you end up with **a dozen sessions across
+folders, git worktrees, and repos** — and two problems:
+
+1. **You lose track.** Which sessions are still reasoning? Which finished and
+   are waiting on you? Which died three days ago?
+2. **Your desktop drowns.** Every session is another terminal window.
+
+**Leader** replaces the window pile with a single native window: a session
+**sidebar** on the left, and an **embedded terminal** on the right that runs
+the real `claude --resume` *inside the app*. Click a session, work in it,
+click the next one — opened sessions stay alive in the background for instant
+switching.
+
+> The UI is currently in Chinese (需处理 = needs you, 置顶 = pinned,
+> 陈旧 = stale, 已归档 = archived). PRs for localization welcome.
+
+## Features
+
+### 🗂 A fleet board, not a session list
+- Sessions are auto-bucketed: **needs-you** first, then grouped **by folder**
+  (or flat by recency — one click to toggle), **stale** (15 days+) tucked away,
+  **archived** out of sight.
+- **Pin** your daily drivers via right-click — they gather at the top under a
+  single golden star. **Archive**, **rename** (Leader-only nickname), and
+  **mark unread** are one right-click away.
+- **Search everything**: title, nickname, last prompt, folder, branch — or
+  paste a raw session id.
+
+### 🖥 Terminals that live inside the app
+- Click a row → the session runs **embedded** (SwiftTerm) in the main pane.
+  Switching back is instant; background sessions keep running.
+- **`+` / ⌘⇧O** mint a brand-new session — the session id is chosen up front
+  (`claude --session-id`), so there is no race to discover it.
+- **Double-tap ⌃Control** drops a quake-style **scratch terminal** over the
+  main pane, already `cd`'d into the active session's working directory.
+- Escape hatch: open any session in a real **kitty** window (for full-screen
+  TUIs that don't scroll well embedded).
+
+### ✨ Status you can read from across the room
+- A session that is **actively reasoning shimmers** — its title dims and a
+  bright band sweeps across it, ChatGPT-"Working…" style (driven by Claude
+  Code lifecycle hooks, honors Reduce Motion).
+- A session that **finished while you were elsewhere** gets a breathing purple
+  dot until you look at it.
+- A red **unread badge** (mail-style) for sessions you flag to revisit —
+  opening the session clears it automatically.
+- A quiet grey badge marks rows whose embedded process is alive (filled) or
+  has exited (hollow).
+
+### ⌨️ Keyboard-first
+
+| Shortcut | Action |
+| --- | --- |
+| `↑` / `↓` / `Enter` | Navigate the sidebar / open the selected session |
+| `⌘F` | Focus search (works even while a terminal has focus) |
+| `⌘W` | Close the active embedded session (with confirm — the app stays) |
+| `⌘⇧O` | Quick-open: type a directory (live completion), Enter starts a session there |
+| `⌃⌃` (double-tap) | Toggle the scratch terminal |
+| `⌘Q` | Quit (confirms if embedded sessions are still running) |
+
+## Quick start
+
+### Requirements
+
+- **macOS 14+** (Apple Silicon or Intel — you build it locally)
+- **Xcode Command Line Tools** — `xcode-select --install`
+- **Claude Code** — `claude` on your `PATH`
+- Optional: [kitty](https://sw.kovidgoyal.net/kitty/) (`brew install --cask kitty`)
+  — only the "open in kitty window" escape hatch needs it
 - Optional: `brew install --cask font-jetbrains-mono`
 
-## Build & install
+### Build & install
 
 ```bash
+git clone https://github.com/Coiggahou2002/leader.git
+cd leader
 ./build.sh                      # -> dist/Leader.app (self-contained)
 cp -R dist/Leader.app ~/Applications/
 open ~/Applications/Leader.app
 ```
 
-The Python backend is bundled **inside** the app, so the installed app does not
-depend on this source tree.
+The Python backend is bundled **inside** the app bundle, so the installed app
+has no dependency on the source tree.
 
-## Configure (optional)
+## Configuration
 
-All machine-specific settings have defaults; override any in
-`~/.config/leader/config.json`:
+Everything has a sane default; override any key in `~/.config/leader/config.json`
+(see `config.example.json`):
 
 ```jsonc
 {
@@ -63,39 +117,59 @@ All machine-specific settings have defaults; override any in
   "worktree_repos": ["~/dev/myrepo"], // git repos to show ahead/dirty + offer agent-worktree cleanup
   "claude_bin": "",                    // "" = resolve via `command -v claude`
   "kitty_bin": "/Applications/kitty.app/Contents/MacOS/kitty",
-  "data_dir": "~/.claude/leader"       // where Leader stores windows/archived/pinned/names
+  "data_dir": "~/.claude/leader"       // where Leader stores pinned/archived/unread/nicknames
 }
 ```
-See `config.example.json`.
 
-## Architecture
+Terminal appearance (font, size, line height, soft Kaku-Dark palette) and the
+proxy are also adjustable in-app via **Settings**.
+
+## How it works
 
 ```
-LeaderApp.swift  native panel (SwiftUI). Shells out to the python backend.
-  └─ scan.py     read ~/.claude/projects/*.jsonl -> bucket/sort sessions (JSON)
-  └─ launch.py   open/switch a session's kitty window (kitty remote control)
-  └─ archive.py / pin.py / name.py   manage per-session flags & nicknames
-  └─ config.py   defaults + ~/.config/leader/config.json
-server.py        optional browser version of the same board (no native app)
+Leader.app (SwiftUI)
+ ├─ LeaderApp.swift        sidebar, buckets, search, shimmer/breathing status
+ ├─ EmbeddedTerminal.swift SwiftTerm views + per-session process lifecycle
+ ├─ QuakeTerminal.swift    double-tap-Ctrl scratch terminal
+ └─ Resources/backend/     read-only Python, bundled into the app
+     ├─ scan.py            read ~/.claude/projects/*.jsonl → bucket/sort (JSON)
+     ├─ launch.py          kitty escape hatch (remote control, exact-window focus)
+     ├─ archive.py / pin.py / unread.py / name.py   per-session flags & nicknames
+     ├─ leader-hook.py     turn-lifecycle events → live "reasoning/done" status
+     └─ config.py          defaults + ~/.config/leader/config.json
 ```
 
-Window management uses **kitty's remote control** (`kitty @ launch / focus-window
---match id:`), which is the only terminal that can open and re-focus an exact OS
-window reliably — including many sessions sharing one folder.
-
-## Notes / known issues
-
-- **Env hygiene**: a `claude` started with `CLAUDECODE` / `CLAUDE_CODE_*` /
+- **Your data is safe.** Leader treats `~/.claude/projects/*` as **read-only**
+  and keeps its own small state files under `~/.claude/leader`. Conversation
+  transcripts are never modified.
+- **Live status** comes from Claude Code hooks: Leader registers
+  `leader-hook.py` on `UserPromptSubmit` / `Stop` / `SessionEnd` (merged via
+  `--settings`, without replacing your own hooks) and watches the event
+  directory with FSEvents — sub-second shimmer, no polling lag.
+- **Env hygiene:** a `claude` started with `CLAUDECODE` / `CLAUDE_CODE_*` /
   `CODEX_COMPANION_*` in its environment runs as a *nested child session* and
-  does NOT persist its transcript. Leader strips these before launching, both for
-  the kitty daemon and per-window. Keep that in mind if you hack on `launch.py`.
-- **`+` new-session sid capture (to fix)**: a new session's id is unknown until
-  its first message lands; `new_session()` polls the project dir up to ~12s to
-  capture it for precise window-reuse. Clicking `+` twice within that window can
-  mis-map or drop a windows.json entry (no conversation loss). Planned fix:
-  drop windows.json + the poll and identify windows at click time via
-  `kitty @ ls` cmdline (`--resume <sid>`) — deterministic, race-free.
+  does not persist its transcript. Leader strips these before every launch.
+  Keep that in mind if you hack on `launch.py`.
+
+## Known issues / roadmap
+
+- **kitty `+` sid capture:** in the kitty escape-hatch path, a new session's id
+  is unknown until its first message lands; `launch.py` polls up to ~12 s to
+  map the window. Clicking `+` twice quickly can mis-map a windows.json entry
+  (no conversation loss). Planned fix: identify windows at click time via
+  `kitty @ ls` cmdline matching — deterministic and race-free.
+- UI localization (English) is not done yet.
+- `server.py` is an optional browser version of the same board — functional but
+  unpolished.
+
+## Contributing
+
+Issues and PRs are welcome. The codebase is deliberately small: one SwiftUI
+file for the UI, a few dependency-free Python scripts for data. Please keep
+that spirit — no frameworks for the backend, no conversation-data writes, and
+run `./build.sh` before submitting.
 
 ## License
 
-TBD.
+Not yet licensed — a proper open-source license (likely MIT) is on the way.
+Until then, all rights reserved.

@@ -49,7 +49,7 @@ struct Session: Decodable, Identifiable {
     let idle_h: Double
     let msgs: Int
     let out_tok: Int
-    let alive: Bool
+    var alive: Bool         // var: optimistically cleared when its terminal is closed
     var archived: Bool      // var: allows optimistic local toggle
     var pinned: Bool
     // Position in pinned.json (= pin time). The 置顶 section sorts by this so
@@ -236,6 +236,17 @@ final class Store {
         Task.detached(priority: .userInitiated) {
             Backend.setNickname(s, trimmed)
             await MainActor.run { self.epoch += 1; self.refresh() }   // invalidate scans started before this write landed
+        }
+    }
+    // Cmd+W / header ✕ just killed a terminal: `alive` comes from the 6s scan and
+    // would keep the row in 活跃 for seconds — clear it optimistically, invalidate
+    // in-flight scans, and reconcile after the process tree has actually died.
+    func markTerminalClosed(_ fullSid: String) {
+        optimistic(fullSid) { $0.alive = false }
+        epoch += 1
+        Task.detached(priority: .userInitiated) {
+            try? await Task.sleep(for: .milliseconds(800))
+            await MainActor.run { self.refresh() }
         }
     }
     private func optimistic(_ id: String, _ change: (inout Session) -> Void) {
@@ -1034,10 +1045,11 @@ struct ContentView: View {
         }
     }
 
-    // Cmd+W: close only the embedded session shown in the main area.
+    // Cmd+W / header ✕: close only the embedded session shown in the main area.
     private func closeActiveSession() {
         guard let sid = activeEmbed?.sid else { return }
         TerminalManager.shared.close(sid)
+        store.markTerminalClosed(sid)     // drop from 活跃 immediately, then reconcile
         if pendingNew?.sid == sid { pendingNew = nil }
         activeSID = nil
     }
@@ -1194,9 +1206,7 @@ struct ContentView: View {
                     .help("在独立 kitty 窗口打开(全屏 TUI 滚动用)")
             }
             Button("关闭会话终端", systemImage: "xmark.circle.fill") {
-                TerminalManager.shared.close(sid)
-                if pendingNew?.sid == sid { pendingNew = nil }
-                activeSID = nil
+                closeActiveSession()      // same path as Cmd+W (kills tree + clears 活跃)
             }
             .buttonStyle(.plain).labelStyle(.iconOnly).foregroundStyle(.secondary)
             .help("杀掉嵌入的 claude 进程(列表项保留)")

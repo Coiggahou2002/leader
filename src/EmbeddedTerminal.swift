@@ -332,6 +332,11 @@ final class TerminalManager: ObservableObject {
         running.remove(sid); exited.remove(sid)
         if let v = views[sid] {
             views.removeValue(forKey: sid)
+            // Kill the whole process GROUP: the child is `zsh -lc "claude …"`, and
+            // terminate() only signals the shell — the orphaned claude can linger
+            // long enough for the next scan's ps to still count it "alive" (活跃).
+            // forkpty setsid's the child, so pgid == shellPid and -pid is the group.
+            if let pid = v.process?.shellPid, pid > 0 { kill(-pid, SIGTERM) }
             v.terminate()
             v.removeFromSuperview()
         }

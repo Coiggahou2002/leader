@@ -238,9 +238,11 @@ final class Store {
             await MainActor.run { self.epoch += 1; self.refresh() }   // invalidate scans started before this write landed
         }
     }
-    // Cmd+W / header ✕ just killed a terminal: `alive` comes from the 6s scan and
-    // would keep the row in 活跃 for seconds — clear it optimistically, invalidate
-    // in-flight scans, and reconcile after the process tree has actually died.
+    // Cmd+W / header ✕ just killed a terminal. The 活跃 tab already dropped the
+    // row synchronously (it keys off TerminalManager.running, which close()
+    // clears). This only handles the SECONDARY signals that read scan-derived
+    // `alive`: stop the title shimmer at once (a SIGTERM kill fires no Stop hook,
+    // so activity.running can lag), and reconcile once the process tree is dead.
     func markTerminalClosed(_ fullSid: String) {
         optimistic(fullSid) { $0.alive = false }
         epoch += 1
@@ -971,10 +973,18 @@ struct ContentView: View {
         var id: Self { self }
     }
 
-    // pinned overrides stale (user explicitly wants it handy).
-    // Fixed order = pin time (pin_order), NOT recency — a pinned row must never
-    // drift when scans update idle times. sid tiebreak keeps ties deterministic.
+    // INVARIANT — tab membership. `archived` is EXCLUSIVE: an archived session
+    // appears ONLY in 已归档; every other list filters `!archived`. Breaking this
+    // (as liveList once did) is the root of the "archived it but it won't leave"
+    // class of bug. 会话 buckets pinned/stale/folder are mutually exclusive;
+    // 活跃 is an ORTHOGONAL filter over the SINGLE synchronous source of truth
+    // for "has a terminal open in Leader right now" — TerminalManager.running.
+    // It deliberately does NOT read scan-derived `alive` (6s-laggy + racy on
+    // close) nor external REPLs; open/close mutate `running` synchronously, so
+    // the tab is correct by construction with no timing dependence.
     private var pinnedList: [Session] {
+        // Fixed order = pin time (pin_order), NOT recency — a pinned row must
+        // never drift when scans update idle times. sid tiebreak is deterministic.
         store.sessions.filter { $0.pinned && !$0.archived }.sorted {
             let (a, b) = ($0.pin_order ?? .max, $1.pin_order ?? .max)
             return a == b ? $0.full_sid < $1.full_sid : a < b
@@ -982,11 +992,8 @@ struct ContentView: View {
     }
     private var staleList: [Session] { store.sessions.filter { !$0.archived && !$0.pinned && $0.isStale } }
     private var archivedList: [Session] { store.sessions.filter(\.archived) }
-    // 活跃 tab: every session with a terminal open RIGHT NOW — embedded in-app
-    // (TerminalManager.running) or an external claude REPL scan identified (alive).
-    // No archived/stale filtering: a live terminal trumps every other state.
     private var liveList: [Session] {
-        store.sessions.filter { term.running.contains($0.full_sid) || $0.alive }
+        store.sessions.filter { !$0.archived && term.running.contains($0.full_sid) }
             .sorted { $0.idle_h < $1.idle_h }
     }
     private var folders: [(name: String, items: [Session])] {

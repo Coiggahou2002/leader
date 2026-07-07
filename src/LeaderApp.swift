@@ -384,8 +384,8 @@ struct WorkingShimmer: ViewModifier {
             content
                 .opacity(0.45)            // dimmed base; the band restores full brightness
                 .overlay {
-                    // Time-driven (not onAppear+repeatForever): LazyVStack re-fires
-                    // onAppear with @State already at its end value, freezing the
+                    // Time-driven (not onAppear+repeatForever): a re-rendered row can
+                    // fire onAppear with @State already at its end value, freezing the
                     // sweep; a TimelineView phase is stateless and always correct.
                     TimelineView(.animation) { tl in
                         GeometryReader { geo in
@@ -1312,7 +1312,17 @@ struct ContentView: View {
                     ProgressView().controlSize(.small)
                         .frame(maxWidth: .infinity).padding(.top, 60)
                 } else {
-                    LazyVStack(alignment: .leading, spacing: 2) {
+                    // VStack, NOT LazyVStack: rows carry parent-computed state
+                    // (`selected` = selectedID == s.id, hover). A LazyVStack does
+                    // not reliably re-render its children when that parent @State
+                    // changes — because the read happens inside the lazy child, not
+                    // the eager body — so clicking a row switched the terminal
+                    // (activeSID, read eagerly) but left the sidebar highlight on the
+                    // previous row. Eager VStack re-renders every row on any state
+                    // change. The list is bounded (≈ session count) and each row is
+                    // light, so eager layout is cheap and kills a whole class of
+                    // "row visual doesn't update" bugs (highlight + stuck hover).
+                    VStack(alignment: .leading, spacing: 2) {
                         switch mode {
                         case .active: activeContent
                         case .live: liveContent
@@ -1327,11 +1337,9 @@ struct ContentView: View {
             .onChange(of: selectedID) { _, id in
                 if let id { withAnimation(.easeInOut(duration: 0.12)) { proxy.scrollTo(id, anchor: .center) } }
             }
-            // Kill stuck hover: rows live in a LazyVStack, so a hovered row that
-            // scrolls off (or the pointer leaving into the terminal pane / out the
-            // window) can miss its per-row mouseExited, leaving hoveredID pinned on
-            // it. Clearing when the pointer leaves the whole list guarantees that at
-            // rest only the selected row stays highlighted.
+            // Belt-and-suspenders for stuck hover: a row leaving under the pointer
+            // (scroll, reorder) can miss its mouseExited; clear hoveredID when the
+            // pointer leaves the whole list so at rest only the selected row glows.
             .onHover { inside in if !inside { hoveredID = nil } }
         }
     }

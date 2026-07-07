@@ -6,11 +6,6 @@ import Foundation
 import AppKit
 import SwiftUI
 import SwiftTerm
-import os
-
-// Temporary diagnostic channel. Read with:
-//   log show --last 3m --predicate 'subsystem == "com.leader.app"' --info
-let leaderLog = Logger(subsystem: "com.leader.app", category: "liveness")
 
 // Machine-specific settings, mirroring config.py defaults, in the SAME file the
 // python backend reads (~/.config/leader/config.json). Read FRESH on each access
@@ -301,7 +296,6 @@ final class TerminalManager: ObservableObject {
 
     func terminal(forSid sid: String, cwd: String) -> EmbeddedTerminalView {
         if let v = views[sid] { return v }
-        leaderLog.info("terminal() CREATE new view + spawn for \(sid, privacy: .public)")
         let tv = EmbeddedTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         applyTermTheme(tv)
         delegate.owner = self
@@ -338,13 +332,11 @@ final class TerminalManager: ObservableObject {
     private func markRunningDeferred(_ sid: String) {
         DispatchQueue.main.async {
             guard self.views[sid] != nil else { return }   // closed before the tick landed
-            leaderLog.info("running.INSERT \(sid, privacy: .public)")
             self.running.insert(sid); self.exited.remove(sid)
         }
     }
     func isOpen(_ sid: String) -> Bool { views[sid] != nil }
     func close(_ sid: String) {
-        leaderLog.info("close() \(sid, privacy: .public) running.remove")
         // Clear badge state UNCONDITIONALLY first — even if the view is somehow
         // already gone, the sidebar badge (driven by running/exited) must clear.
         // Doing it before terminate() also means the async processTerminated ->
@@ -420,7 +412,6 @@ struct TerminalContainer: NSViewRepresentable {
     }
     func updateNSView(_ host: NSView, context: Context) {
         host.layer?.backgroundColor = terminalHostBGColor().cgColor   // keep gutter matching after a theme toggle
-        leaderLog.info("TerminalContainer.updateNSView sid=\(sid, privacy: .public)")
         let term = mgr.terminal(forSid: sid, cwd: cwd)
         for sub in host.subviews where sub !== term { sub.removeFromSuperview() }
         if term.superview !== host {

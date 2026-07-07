@@ -1066,10 +1066,13 @@ struct ContentView: View {
 
     // Close one session's embedded terminal (Cmd+W target or the header ✕).
     private func closeSession(_ sid: String) {
+        // Unmount the terminal view FIRST (activeSID=nil → terminalArea shows the
+        // empty state, TerminalContainer leaves the tree), so nothing can re-run
+        // its updateNSView and re-spawn the terminal we're about to kill.
+        if activeSID == sid { activeSID = nil }
+        if pendingNew?.sid == sid { pendingNew = nil }
         TerminalManager.shared.close(sid)
         store.markTerminalClosed(sid)     // drop from 活跃 immediately, then reconcile
-        if pendingNew?.sid == sid { pendingNew = nil }
-        if activeSID == sid { activeSID = nil }
     }
 
     // The scratch (quake) terminal opens in the active session's working dir; keep

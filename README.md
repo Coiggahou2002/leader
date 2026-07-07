@@ -34,15 +34,14 @@ the real `claude --resume` *inside the app*. Click a session, work in it,
 click the next one — opened sessions stay alive in the background for instant
 switching.
 
-> The UI is currently in Chinese (需处理 = needs you, 置顶 = pinned,
-> 陈旧 = stale, 已归档 = archived). PRs for localization welcome.
+> The UI is currently in Chinese (置顶 = pinned, 陈旧 = stale,
+> 已归档 = archived). PRs for localization welcome.
 
 ## Features
 
 ### 🗂 A fleet board, not a session list
-- Sessions are auto-bucketed: **needs-you** first, then grouped **by folder**
-  (or flat by recency — one click to toggle), **stale** (15 days+) tucked away,
-  **archived** out of sight.
+- Sessions are grouped **by folder** (or flat by recency — one click to
+  toggle), **stale** (15 days+) tucked away, **archived** out of sight.
 - **Pin** your daily drivers via right-click — they gather at the top under a
   single golden star. **Archive**, **rename** (Leader-only nickname), and
   **mark unread** are one right-click away.

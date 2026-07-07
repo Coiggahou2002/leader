@@ -46,13 +46,16 @@ struct Session: Decodable, Identifiable {
     let resume_cwd: String?   // dir `claude --resume` must run from (scan.py)
     let branch: String?
     let bucket: String
-    let why: [String]
     let idle_h: Double
     let msgs: Int
     let out_tok: Int
-    let alive: Bool
+    var alive: Bool         // var: optimistically cleared when its terminal is closed
     var archived: Bool      // var: allows optimistic local toggle
     var pinned: Bool
+    // Position in pinned.json (= pin time). The 置顶 section sorts by this so
+    // pinned rows never reshuffle with activity. nil (e.g. an optimistic pin
+    // before the next scan) sorts last, matching pin.py's append-on-add.
+    var pin_order: Int?
     var unread: Bool = false   // manually marked unread (red "1" badge); default keeps old data decodable
     var nickname: String?
     var id: String { full_sid }
@@ -67,7 +70,6 @@ struct Session: Decodable, Identifiable {
                            .replacingOccurrences(of: home + "/", with: "~/")
     }
     var ago: String { idle_h < 48 ? "\(Int(idle_h.rounded()))h" : "\(Int((idle_h/24).rounded()))d" }
-    var needsAttention: Bool { bucket == "a" }
     var isStale: Bool { idle_h >= 15 * 24 }     // 最后消息 ≥ 15 天
     static let order = ["a": 0, "b": 1, "c": 2]
 }
@@ -193,10 +195,14 @@ final class Store {
         }
     }
     func setArchived(_ s: Session, _ on: Bool) {
-        optimistic(s.id) { $0.archived = on }            // UI 立即变
+        // Archiving also unpins: "archived but still pinned" is a contradiction —
+        // the pin survived invisibly and un-archiving teleported the session into
+        // 置顶 instead of back to its folder, which reads as "unarchive did nothing".
+        optimistic(s.id) { $0.archived = on; if on { $0.pinned = false } }   // UI 立即变
         flash(on ? "已归档" : "已取消归档")
         Task.detached(priority: .userInitiated) {
             Backend.setArchived(s, on)
+            if on && s.pinned { Backend.setPinned(s, false) }
             await MainActor.run { self.epoch += 1; self.refresh() }   // 落盘后对账;并作废落盘前发起的扫描
         }
     }
@@ -230,6 +236,19 @@ final class Store {
         Task.detached(priority: .userInitiated) {
             Backend.setNickname(s, trimmed)
             await MainActor.run { self.epoch += 1; self.refresh() }   // invalidate scans started before this write landed
+        }
+    }
+    // Cmd+W / header ✕ just killed a terminal. The 活跃 tab already dropped the
+    // row synchronously (it keys off TerminalManager.running, which close()
+    // clears). This only handles the SECONDARY signals that read scan-derived
+    // `alive`: stop the title shimmer at once (a SIGTERM kill fires no Stop hook,
+    // so activity.running can lag), and reconcile once the process tree is dead.
+    func markTerminalClosed(_ fullSid: String) {
+        optimistic(fullSid) { $0.alive = false }
+        epoch += 1
+        Task.detached(priority: .userInitiated) {
+            try? await Task.sleep(for: .milliseconds(800))
+            await MainActor.run { self.refresh() }
         }
     }
     private func optimistic(_ id: String, _ change: (inout Session) -> Void) {
@@ -365,8 +384,8 @@ struct WorkingShimmer: ViewModifier {
             content
                 .opacity(0.45)            // dimmed base; the band restores full brightness
                 .overlay {
-                    // Time-driven (not onAppear+repeatForever): LazyVStack re-fires
-                    // onAppear with @State already at its end value, freezing the
+                    // Time-driven (not onAppear+repeatForever): a re-rendered row can
+                    // fire onAppear with @State already at its end value, freezing the
                     // sweep; a TimelineView phase is stateless and always correct.
                     TimelineView(.animation) { tl in
                         GeometryReader { geo in
@@ -673,15 +692,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Row
 struct Row: View {
     let s: Session
-    let archiveSymbol: String
     let onOpen: () -> Void
     let onArchive: () -> Void
     var onPin: () -> Void = {}
     var onRename: () -> Void = {}
     var onMarkUnread: () -> Void = {}
-    var showPin: Bool = true
-    var canUnread: Bool = true
-    var archiveTitle: String = "归档"
     var selected: Bool = false
     @Binding var hoveredID: String?
     @ObservedObject var term = TerminalManager.shared   // embed state (running/exited)
@@ -698,6 +713,12 @@ struct Row: View {
     }
     // Guard on s.alive so a crashed session (no Stop event) can't shimmer forever.
     private var isWorking: Bool { activity.running.contains(s.full_sid) && s.alive }
+    // Archive affordances derive from the session's own state — never passed in
+    // by the surrounding list, so a row can't show 取消归档 after it moved back
+    // to the active tab (or vice versa). Pin/unread only make sense un-archived.
+    private var archiveSymbol: String { s.archived ? "tray.and.arrow.up" : "archivebox" }
+    private var archiveTitle: String { s.archived ? "取消归档" : "归档" }
+    private var canPinOrUnread: Bool { !s.archived }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: DS.gap + 3) {
@@ -714,20 +735,20 @@ struct Row: View {
                 }
                 Text("\(s.ago)前 · \(s.repo)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                if s.needsAttention, !s.why.isEmpty {
-                    Text(s.why.joined(separator: " · "))
-                        .font(.caption).foregroundStyle(.orange).lineLimit(2)
-                }
             }
             Spacer(minLength: 0)
             // Archive is a deliberate action: keep it out of sight until the row is
             // hovered. The trailing hit-zone still works — clicking requires the
             // pointer to be on the row, which is exactly when the icon is visible.
-            Image(systemName: archiveSymbol).foregroundStyle(.secondary)
+            // Un-archive is tinted: at caption size the two glyphs look alike, and
+            // a grey box on a just-unarchived row reads as "nothing changed".
+            Image(systemName: archiveSymbol)
+                .foregroundStyle(s.archived ? AnyShapeStyle(Color.accentColor)
+                                            : AnyShapeStyle(.secondary))
                 .frame(width: 18)
                 .font(.caption)
                 .opacity(hover ? 1 : 0)
-                .help(archiveSymbol == "archivebox" ? "归档" : "取消归档")
+                .help(archiveTitle)
         }
         .padding(.vertical, DS.rowPadV).padding(.horizontal, DS.rowPadH)
         .frame(minHeight: 36)
@@ -737,8 +758,8 @@ struct Row: View {
         .contentShape(RoundedRectangle(cornerRadius: DS.corner))
         .overlay { MouseLayer(onClick: onOpen, onArchive: onArchive, onPin: onPin,
                               onRename: onRename, onMarkUnread: onMarkUnread,
-                              canPin: showPin, isPinned: s.pinned, isUnread: s.unread,
-                              canUnread: canUnread, archiveTitle: archiveTitle, onHover: { inside in
+                              canPin: canPinOrUnread, isPinned: s.pinned, isUnread: s.unread,
+                              canUnread: canPinOrUnread, archiveTitle: archiveTitle, onHover: { inside in
             if inside { hoveredID = s.id } else if hoveredID == s.id { hoveredID = nil }
         }) }
         .accessibilityElement(children: .combine)
@@ -813,12 +834,14 @@ struct ContentView: View {
     @State private var pathInput = ""
     @State private var pathSel = 0
     @State private var confirmCloseActive = false    // Cmd+W confirm
+    @State private var closeTarget: (sid: String, name: String)?   // what Cmd+W will close
     // A just-created session: embedded immediately at a known sid, before the
     // scanner (every 6s) picks it up into store.sessions.
     @State private var pendingNew: (sid: String, cwd: String)?
     @FocusState private var focus: Focus?
     @AppStorage("leader.grouped") private var grouped = true
     @Environment(\.colorScheme) private var scheme
+    @ObservedObject private var term = TerminalManager.shared   // 活跃 tab: embed liveness
 
     enum Focus { case list, search, openPath }
     // "" -> launch.py uses config.new_session_cwd() (default ~). Configure in
@@ -830,6 +853,7 @@ struct ContentView: View {
         if !query.isEmpty {
             switch mode {
             case .active:   return store.sessions.filter { !$0.archived && matches($0) }.sorted(by: Self.byPriority)
+            case .live:     return liveList.filter(matches)
             case .stale:    return staleList.filter(matches).sorted { $0.idle_h < $1.idle_h }
             case .archived: return archivedList.filter(matches).sorted(by: Self.byPriority)
             }
@@ -838,10 +862,10 @@ struct ContentView: View {
         case .active:
             var arr = pinnedList
             if grouped {
-                arr += attention
                 for f in folders where !collapsed.contains(f.name) { arr += f.items }
             } else { arr += flatList }
             return arr
+        case .live:     return liveList
         case .stale:    return staleExpanded ? staleList.sorted { $0.idle_h < $1.idle_h } : []
         case .archived: return archivedList.sorted(by: Self.byPriority)
         }
@@ -945,19 +969,35 @@ struct ContentView: View {
     }
 
     enum Mode: String, CaseIterable, Identifiable {
-        case active = "会话", stale = "陈旧", archived = "已归档"
+        case active = "会话", live = "活跃", stale = "陈旧", archived = "已归档"
         var id: Self { self }
     }
 
-    // pinned overrides stale (user explicitly wants it handy)
+    // INVARIANT — tab membership. `archived` is EXCLUSIVE: an archived session
+    // appears ONLY in 已归档; every other list filters `!archived`. Breaking this
+    // (as liveList once did) is the root of the "archived it but it won't leave"
+    // class of bug. 会话 buckets pinned/stale/folder are mutually exclusive;
+    // 活跃 is an ORTHOGONAL filter over the SINGLE synchronous source of truth
+    // for "has a terminal open in Leader right now" — TerminalManager.running.
+    // It deliberately does NOT read scan-derived `alive` (6s-laggy + racy on
+    // close) nor external REPLs; open/close mutate `running` synchronously, so
+    // the tab is correct by construction with no timing dependence.
     private var pinnedList: [Session] {
-        store.sessions.filter { $0.pinned && !$0.archived }.sorted(by: Self.byPriority)
+        // Fixed order = pin time (pin_order), NOT recency — a pinned row must
+        // never drift when scans update idle times. sid tiebreak is deterministic.
+        store.sessions.filter { $0.pinned && !$0.archived }.sorted {
+            let (a, b) = ($0.pin_order ?? .max, $1.pin_order ?? .max)
+            return a == b ? $0.full_sid < $1.full_sid : a < b
+        }
     }
-    private var attention: [Session] { store.sessions.filter { !$0.archived && !$0.pinned && !$0.isStale && $0.bucket == "a" } }
     private var staleList: [Session] { store.sessions.filter { !$0.archived && !$0.pinned && $0.isStale } }
     private var archivedList: [Session] { store.sessions.filter(\.archived) }
+    private var liveList: [Session] {
+        store.sessions.filter { !$0.archived && term.running.contains($0.full_sid) }
+            .sorted { $0.idle_h < $1.idle_h }
+    }
     private var folders: [(name: String, items: [Session])] {
-        let rest = store.sessions.filter { !$0.archived && !$0.pinned && !$0.isStale && $0.bucket != "a" }
+        let rest = store.sessions.filter { !$0.archived && !$0.pinned && !$0.isStale }
         return Dictionary(grouping: rest, by: \.repo)
             .map { (name: $0.key, items: $0.value.sorted(by: Self.byPriority)) }
             .sorted { $0.name < $1.name }
@@ -1000,25 +1040,39 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showSettings) { SettingsSheet() }
         .onReceive(NotificationCenter.default.publisher(for: .leaderCloseActive)) { _ in
-            if activeEmbed != nil { confirmCloseActive = true }   // ignore when nothing is open
+            // Target the embedded session in the main pane; else fall back to the
+            // sidebar-SELECTED row if its terminal is open (e.g. selecting in 活跃
+            // with ↑/↓ and hitting Cmd+W while the main pane is empty). A silent
+            // no-op here read as "close is broken", so always give feedback.
+            if let a = activeEmbed {
+                closeTarget = (a.sid, a.name); confirmCloseActive = true
+            } else if let id = selectedID, let s = store.sessions.first(where: { $0.id == id }),
+                      TerminalManager.shared.isOpen(s.full_sid) {
+                closeTarget = (s.full_sid, s.name); confirmCloseActive = true
+            } else {
+                store.flash("没有打开的会话终端")
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .leaderFocusSearch)) { _ in
             focus = .search
         }
-        .confirmationDialog("关闭当前会话?", isPresented: $confirmCloseActive, titleVisibility: .visible) {
-            Button("关闭会话", role: .destructive) { closeActiveSession() }
+        .confirmationDialog("关闭会话终端?", isPresented: $confirmCloseActive, titleVisibility: .visible) {
+            Button("关闭会话", role: .destructive) { if let t = closeTarget { closeSession(t.sid) } }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("会杀掉「\(activeEmbed?.name ?? "")」的嵌入进程(transcript 已保存,可重新打开)。Leader 不会退出。")
+            Text("会杀掉「\(closeTarget?.name ?? "")」的嵌入进程(transcript 已保存,可重新打开)。Leader 不会退出。")
         }
     }
 
-    // Cmd+W: close only the embedded session shown in the main area.
-    private func closeActiveSession() {
-        guard let sid = activeEmbed?.sid else { return }
-        TerminalManager.shared.close(sid)
+    // Close one session's embedded terminal (Cmd+W target or the header ✕).
+    private func closeSession(_ sid: String) {
+        // Unmount the terminal view FIRST (activeSID=nil → terminalArea shows the
+        // empty state, TerminalContainer leaves the tree), so nothing can re-run
+        // its updateNSView and re-spawn the terminal we're about to kill.
+        if activeSID == sid { activeSID = nil }
         if pendingNew?.sid == sid { pendingNew = nil }
-        activeSID = nil
+        TerminalManager.shared.close(sid)
+        store.markTerminalClosed(sid)     // drop from 活跃 immediately, then reconcile
     }
 
     // The scratch (quake) terminal opens in the active session's working dir; keep
@@ -1173,9 +1227,7 @@ struct ContentView: View {
                     .help("在独立 kitty 窗口打开(全屏 TUI 滚动用)")
             }
             Button("关闭会话终端", systemImage: "xmark.circle.fill") {
-                TerminalManager.shared.close(sid)
-                if pendingNew?.sid == sid { pendingNew = nil }
-                activeSID = nil
+                closeSession(sid)         // same path as Cmd+W (kills tree + clears 活跃)
             }
             .buttonStyle(.plain).labelStyle(.iconOnly).foregroundStyle(.secondary)
             .help("杀掉嵌入的 claude 进程(列表项保留)")
@@ -1260,9 +1312,20 @@ struct ContentView: View {
                     ProgressView().controlSize(.small)
                         .frame(maxWidth: .infinity).padding(.top, 60)
                 } else {
-                    LazyVStack(alignment: .leading, spacing: 2) {
+                    // VStack, NOT LazyVStack: rows carry parent-computed state
+                    // (`selected` = selectedID == s.id, hover). A LazyVStack does
+                    // not reliably re-render its children when that parent @State
+                    // changes — because the read happens inside the lazy child, not
+                    // the eager body — so clicking a row switched the terminal
+                    // (activeSID, read eagerly) but left the sidebar highlight on the
+                    // previous row. Eager VStack re-renders every row on any state
+                    // change. The list is bounded (≈ session count) and each row is
+                    // light, so eager layout is cheap and kills a whole class of
+                    // "row visual doesn't update" bugs (highlight + stuck hover).
+                    VStack(alignment: .leading, spacing: 2) {
                         switch mode {
                         case .active: activeContent
+                        case .live: liveContent
                         case .stale: staleContent
                         case .archived: archivedContent
                         }
@@ -1274,11 +1337,9 @@ struct ContentView: View {
             .onChange(of: selectedID) { _, id in
                 if let id { withAnimation(.easeInOut(duration: 0.12)) { proxy.scrollTo(id, anchor: .center) } }
             }
-            // Kill stuck hover: rows live in a LazyVStack, so a hovered row that
-            // scrolls off (or the pointer leaving into the terminal pane / out the
-            // window) can miss its per-row mouseExited, leaving hoveredID pinned on
-            // it. Clearing when the pointer leaves the whole list guarantees that at
-            // rest only the selected row stays highlighted.
+            // Belt-and-suspenders for stuck hover: a row leaving under the pointer
+            // (scroll, reorder) can miss its mouseExited; clear hoveredID when the
+            // pointer leaves the whole list so at rest only the selected row glows.
             .onHover { inside in if !inside { hoveredID = nil } }
         }
     }
@@ -1300,10 +1361,6 @@ struct ContentView: View {
                 ForEach(pinnedList) { s in sessionRow(s) }
             }
             if grouped {
-                if !attention.isEmpty {
-                    SectionHeader(title: "需处理", n: attention.count)
-                    ForEach(attention) { s in sessionRow(s) }
-                }
                 ForEach(folders, id: \.name) { folder in
                     let isCollapsed = collapsed.contains(folder.name)
                     FolderHeader(title: folder.name, n: folder.items.count, collapsed: isCollapsed) {
@@ -1323,11 +1380,25 @@ struct ContentView: View {
     }
 
     private func sessionRow(_ s: Session) -> some View {
-        Row(s: s, archiveSymbol: "archivebox",
-            onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, true) },
+        Row(s: s,
+            onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, !s.archived) },
             onPin: { store.setPinned(s, !s.pinned) }, onRename: { beginRename(s) },
             onMarkUnread: { store.setUnread(s, !s.unread) },
             selected: selectedID == s.id, hoveredID: $hoveredID)
+    }
+
+    @ViewBuilder private var liveContent: some View {
+        let items = liveList.filter(matches)
+        if items.isEmpty {
+            ContentUnavailableView(query.isEmpty ? "没有活跃会话" : "无匹配会话",
+                systemImage: "terminal",
+                description: Text(query.isEmpty ? "开着终端的会话(App 内嵌入运行,或外部 kitty/终端里的 claude)会出现在这里" : ""))
+                .padding(.top, 40)
+        } else {
+            SectionHeader(title: query.isEmpty ? "活跃" : "搜索结果", n: items.count,
+                          icon: query.isEmpty ? "terminal" : "magnifyingglass")
+            ForEach(items) { s in sessionRow(s) }
+        }
     }
 
     @ViewBuilder private var staleContent: some View {
@@ -1360,10 +1431,9 @@ struct ContentView: View {
                 .padding(.top, 40)
         } else {
             ForEach(items) { s in
-                Row(s: s, archiveSymbol: "tray.and.arrow.up",
-                    onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, false) },
-                    onRename: { beginRename(s) }, showPin: false, canUnread: false,
-                    archiveTitle: "取消归档",
+                Row(s: s,
+                    onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, !s.archived) },
+                    onRename: { beginRename(s) },
                     selected: selectedID == s.id, hoveredID: $hoveredID)
             }
         }

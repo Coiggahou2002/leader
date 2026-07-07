@@ -2,7 +2,9 @@
 """leader/scan.py — read-only fleet situational board.
 
 Scans ~/.claude/projects/*/*.jsonl session transcripts + git worktrees and
-buckets every session into (a) needs-you / (b) can-wait / (c) reap.
+buckets every session into (b) can-wait / (c) reap. (The old (a) needs-you
+tier and its yellow row hints were removed — every heuristic fired too often
+and the bucket was pure noise.)
 
 Pure stdlib, read-only. Tunable thresholds live in CONFIG below.
 Usage:  python3 scan.py [--repo SUBSTR] [--all] [--json]
@@ -18,18 +20,12 @@ import config
 
 # ---- tunable thresholds (the priority rules, in one place) -----------------
 CONFIG = {
-    "limbo_min_h": 2,        # dirty/unpushed & idle at least this   -> (a)
-    "limbo_max_h": 24,       #            ... but not older than this
     "canwait_days": 7,       # younger than this & clean             -> (b)
     "reap_days": 14,         # older than this                       -> (c)
     "tiny_msgs": 3,          # fewer user+assistant msgs than this   -> tiny
     "tiny_idle_days": 2,     #            ... & idle this long        -> (c)
     "tail_bytes": 60_000,    # only json-parse the last N bytes/file (cost guard)
 }
-# only a conversation that ENDED on a bad note (last assistant turn), not any
-# mention of "error" buried in a long transcript.
-BAD_TAIL = re.compile(r"(❌|\bFAILED\b|test.{0,3}failed|失败|报错|"
-                      r"还没.{0,4}(修|解决|通过)|未通过|conflict|冲突没)", re.I)
 # does the last assistant turn actually ask the user something?
 ASK = re.compile(r"[?？]|要不要|要我|还是.{0,8}[?？]?$|请确认|你想|你要|"
                  r"哪一个|需要你|确认一下|帮你.{0,6}吗|是否")
@@ -65,7 +61,11 @@ def live_map() -> tuple[dict, dict]:
     except Exception:
         return sid2tty, cwd2ttys
     for line in ps.splitlines():
-        if " claude" not in line or "OpenIsland" in line or "/bin/zsh" in line:
+        # NOTE: no leading space in the "claude" test — Leader's embedded panes
+        # exec the FULL PATH (/…/.local/bin/claude), which " claude" never
+        # matched, so embedded sessions were invisible to alive-detection.
+        # /bin/zsh still excluded: the wrapper line duplicates the child's argv.
+        if "claude" not in line or "OpenIsland" in line or "/bin/zsh" in line:
             continue
         m = re.match(r"\s*(\d+)\s+(ttys\d+)\s+(.*claude.*)", line)
         if not m:
@@ -161,7 +161,7 @@ def digest(path: str) -> dict:
     d = {"file": path, "sid": os.path.basename(path)[:8], "idle_h": None,
          "title": None, "last_prompt": None, "cwd": None, "resume_cwd": None,
          "branch": None, "msgs": 0, "out_tok": 0, "last_role": None,
-         "last_stop": None, "bad_tail": False, "asks": False}
+         "last_stop": None, "asks": False}
     cwds_seen: list[str] = []   # ordered-unique cwds, to pick the resume dir
     # last activity = newest in-transcript message timestamp, NOT file mtime
     # (a background indexer rewrites these files and pollutes mtime).
@@ -215,22 +215,23 @@ def digest(path: str) -> dict:
     d["last_stop"] = last_assistant_stop
     d["resume_cwd"] = _resume_dir(path, cwds_seen) or d["cwd"]
     d["idle_h"] = (NOW - last_ts) / 3600 if last_ts else (NOW - st.st_mtime) / 3600
-    # only the tail of the last assistant turn matters for these signals
+    # only the tail of the last assistant turn matters for this signal
     d["asks"] = bool(ASK.search(last_assistant_text[-300:]))
-    d["bad_tail"] = bool(BAD_TAIL.search(last_assistant_text[-400:]))
     return d
 
 # ---- bucketing (apply the rules) -------------------------------------------
-def classify(d: dict, wt: dict | None) -> tuple[str, list[str]]:
-    c, why = CONFIG, []
-    idle_h, idle_d = d["idle_h"], d["idle_h"] / 24
+# There is deliberately NO "needs you" tier anymore: every transcript heuristic
+# we tried (answered-and-asking, unpushed commits, bad-state tails) fired far
+# too often, so the tier and its yellow row hints were removed. Attention now
+# comes from the live hook signals in the app (shimmer / breathing dot /
+# unread), not transcript archaeology. `why` remains for the CLI/server views.
+def classify(d: dict) -> tuple[str, list[str]]:
+    c = CONFIG
+    idle_d = d["idle_h"] / 24
     # finished turn AND it actually asked you something = genuinely waiting on you
     ball_in_your_court = (d["last_role"] == "assistant"
                           and d["last_stop"] in (None, "end_turn")
                           and d["asks"])
-    # untracked dirt on the always-messy primary checkout is noise; the sharp
-    # "work in limbo" signal is unpushed commits.
-    ahead = (wt.get("ahead") or 0) if wt else 0
 
     # (c) reap ---------------------------------------------------------------
     if idle_d > c["reap_days"]:
@@ -238,19 +239,8 @@ def classify(d: dict, wt: dict | None) -> tuple[str, list[str]]:
     if d["msgs"] < c["tiny_msgs"] and idle_d > c["tiny_idle_days"]:
         return "c", [f"空会话({d['msgs']}条) + {idle_d:.0f}d 没动"]
 
-    # (a) needs you ----------------------------------------------------------
-    # NOTE: "answered & waiting on you" (ball_in_your_court + fresh) used to
-    # promote to (a) here — dropped: it fired on nearly every session whose
-    # last turn ended in a question, flooding 需处理 with noise.
-    if ahead > 0 and c["limbo_min_h"] <= idle_h <= c["limbo_max_h"]:
-        why.append(f"{ahead} 个 commit 没 push")
-    if d["bad_tail"]:
-        why.append("停在坏状态")
-    if why:
-        return "a", why
-
     # (b) can wait -----------------------------------------------------------
-    if ball_in_your_court:  # waiting but stale -> demote
+    if ball_in_your_court:
         return "b", [f"待你回复 {idle_d:.0f}d"]
     if idle_d <= c["canwait_days"]:
         return "b", ["近期活跃、无阻塞信号"]
@@ -263,13 +253,21 @@ def _flag_set(name: str) -> set:
     except Exception:
         return set()
 
+def _flag_list(name: str) -> list:
+    """Like _flag_set but ORDER-PRESERVING (pinned.json is ordered by pin time)."""
+    try:
+        return list(json.load(open(config.data_file(f"{name}.json"))).get("sids", []))
+    except Exception:
+        return []
+
 def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
     wt_all = {}
     for repo in config.worktree_repos():
         wt_all.update(worktrees(repo))
     sid2tty, cwd2ttys = live_map()
     archived = _flag_set("archived")
-    pinned = _flag_set("pinned")
+    # pin order = position in pinned.json (pin time); drives the stable 置顶 sort
+    pin_idx = {sid: i for i, sid in enumerate(_flag_list("pinned"))}
     unread = _flag_set("unread")
     try:
         names = json.load(open(config.data_file("names.json")))
@@ -283,7 +281,7 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
         if repo_filter and repo_filter not in cwd:
             continue
         wt = wt_all.get(cwd)
-        bucket, why = classify(d, wt)
+        bucket, why = classify(d)
         full_sid = os.path.basename(d["file"])[:-6]
         # "alive" = exactly identified as running (only --resume/hook sessions).
         # cwd-sibling liveness is too fuzzy to label a specific session active.
@@ -296,8 +294,8 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
             where = "⚪ 已关"
         d.update(bucket=bucket, why=why, wt=wt, full_sid=full_sid,
                  alive=alive, where=where, archived=full_sid in archived,
-                 pinned=full_sid in pinned, unread=full_sid in unread,
-                 nickname=names.get(full_sid))
+                 pinned=full_sid in pin_idx, pin_order=pin_idx.get(full_sid),
+                 unread=full_sid in unread, nickname=names.get(full_sid))
         sessions.append(d)
 
     home = os.path.expanduser("~")
@@ -334,8 +332,7 @@ def main():
     for repo in config.worktree_repos():
         agent_trees += glob.glob(os.path.join(repo, ".claude/worktrees/agent-*"))
 
-    labels = {"a": "🔴 (a) 需要你 — 不动它就卡着",
-              "b": "🟡 (b) 可缓 — 有空再看",
+    labels = {"b": "🟡 (b) 可缓 — 有空再看",
               "c": "⚪ (c) 僵死 — 建议关/清"}
     def fmt(d):
         cwd = config.short_path(d.get("cwd") or "?")
@@ -349,7 +346,7 @@ def main():
 
     print(f"\n{'='*70}\n  FLEET 态势板  ({datetime.now():%m-%d %H:%M}) — "
           f"{len(sessions)} 个相关会话\n{'='*70}")
-    for b in ("a", "b", "c"):
+    for b in ("b", "c"):
         grp = [s for s in sessions if s["bucket"] == b]
         print(f"\n{labels[b]}  ({len(grp)})")
         for d in grp[:15 if b != 'c' else 8]:

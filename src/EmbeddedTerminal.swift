@@ -304,7 +304,7 @@ final class TerminalManager: ObservableObject {
         tv.startProcess(executable: "/bin/zsh", args: ["-lc", resumeCommand(sid: sid)],
                         environment: termCleanEnv(), currentDirectory: expandTilde(cwd))
         views[sid] = tv
-        running.insert(sid); exited.remove(sid)
+        markRunningDeferred(sid)
         return tv
     }
     // Start a brand-new session at a caller-chosen sid (no --resume). If a view for
@@ -320,8 +320,20 @@ final class TerminalManager: ObservableObject {
         tv.startProcess(executable: "/bin/zsh", args: ["-lc", newSessionCommand(sid: sid)],
                         environment: termCleanEnv(), currentDirectory: expandTilde(cwd))
         views[sid] = tv
-        running.insert(sid); exited.remove(sid)
+        markRunningDeferred(sid)
         return tv
+    }
+    // terminal(forSid:)/newSession are called from TerminalContainer.updateNSView —
+    // i.e. MID view update. Mutating @Published there is SwiftUI undefined behavior
+    // ("Publishing changes from within view updates"): the transaction's other
+    // invalidations get dropped — concretely, clicking a not-yet-open session
+    // switched the terminal pane but the sidebar row highlight never moved.
+    // Defer the publish to the next runloop tick, outside the render pass.
+    private func markRunningDeferred(_ sid: String) {
+        DispatchQueue.main.async {
+            guard self.views[sid] != nil else { return }   // closed before the tick landed
+            self.running.insert(sid); self.exited.remove(sid)
+        }
     }
     func isOpen(_ sid: String) -> Bool { views[sid] != nil }
     func close(_ sid: String) {
@@ -332,6 +344,11 @@ final class TerminalManager: ObservableObject {
         running.remove(sid); exited.remove(sid)
         if let v = views[sid] {
             views.removeValue(forKey: sid)
+            // Kill the whole process GROUP: the child is `zsh -lc "claude …"`, and
+            // terminate() only signals the shell — the orphaned claude can linger
+            // long enough for the next scan's ps to still count it "alive" (活跃).
+            // forkpty setsid's the child, so pgid == shellPid and -pid is the group.
+            if let pid = v.process?.shellPid, pid > 0 { kill(-pid, SIGTERM) }
             v.terminate()
             v.removeFromSuperview()
         }
@@ -379,7 +396,14 @@ func terminalHostBGColor() -> NSColor {
 struct TerminalContainer: NSViewRepresentable {
     let sid: String
     let cwd: String
-    @ObservedObject var mgr = TerminalManager.shared
+    // NOT @ObservedObject: this container hosts exactly one session's terminal and
+    // reparents on sid change. Observing TerminalManager made every running/exited
+    // publish re-run updateNSView, and updateNSView calls the *mutating* factory
+    // terminal(forSid:). So close()'s `running.remove` re-triggered updateNSView on
+    // the still-mounted container, which re-created the just-killed terminal (new
+    // claude process!) and re-inserted `running` — the row popped back into 活跃.
+    // Lifecycle is driven solely by the parent passing sid via activeEmbed.
+    private let mgr = TerminalManager.shared
     func makeNSView(context: Context) -> NSView {
         let host = NSView()
         host.wantsLayer = true

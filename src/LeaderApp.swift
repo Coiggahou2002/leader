@@ -658,13 +658,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // so the default File→Close never fires. Cmd+Q still quits (its own confirm).
     func installKeyMonitor() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
-            // Only plain Cmd (no other modifiers), else let chords through.
-            guard e.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command]
-            else { return e }
-            switch e.charactersIgnoringModifiers?.lowercased() {
-            case "w":
+            let mods = e.modifierFlags.intersection([.command, .control, .option, .shift])
+            let key = e.charactersIgnoringModifiers?.lowercased()
+
+            // Cmd+W is ALWAYS repurposed to "close the active session" and swallowed,
+            // so it can never close the window / quit the app — scratch terminal or
+            // not. (Handled in ContentView with a confirm.) Cmd+Q still quits.
+            if mods == [.command], key == "w" {
                 NotificationCenter.default.post(name: .leaderCloseActive, object: nil)
-                return nil                            // swallow so File→Close never fires
+                return nil
+            }
+
+            // While the double-tap-Ctrl scratch terminal is up it OWNS the keyboard:
+            // Leader's global chords must not steer the main window hidden behind it.
+            // Let Cmd+K/Cmd+F reach the terminal (its clear-scrollback) instead of
+            // opening the palette, and disable tab-switch (Cmd+1..4) and quick-open
+            // (Cmd+Shift+O) entirely until it's dismissed (⌃⌃ again or ✕).
+            let quakeUp = MainActor.assumeIsolated { QuakeTerminal.shared.isVisible }
+            if quakeUp {
+                if mods == [.command], let k = key, ["1", "2", "3", "4"].contains(k) { return nil }
+                if mods == [.command, .shift], key == "o" { return nil }
+                return e
+            }
+
+            // Only plain Cmd (no other modifiers), else let chords through.
+            guard mods == [.command] else { return e }
+            switch key {
             case "k", "f":
                 // Command palette (session search + per-session actions). Claimed
                 // globally so it opens even while an embedded terminal has key focus;

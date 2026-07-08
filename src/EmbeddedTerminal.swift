@@ -21,6 +21,9 @@ enum Conf {
     static var proxy: String { (dict["proxy"] as? String) ?? "" }
     static var claudeBin: String { (dict["claude_bin"] as? String) ?? "" }
     static var newCwd: String { (dict["new_session_cwd"] as? String) ?? "~" }
+    // Post a macOS system notification when a session finishes a turn while you
+    // weren't watching it. On by default.
+    static var notify: Bool { (dict["notify"] as? Bool) ?? true }
     // Terminal appearance. Defaults match the old hard-coded values.
     static var termFont: String { (dict["term_font"] as? String) ?? "JetBrains Mono" }
     static var termFontSize: CGFloat {

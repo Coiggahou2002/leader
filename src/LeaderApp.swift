@@ -901,6 +901,7 @@ struct ContentView: View {
     @State private var selectedID: String?
     @State private var activeSID: String?            // session embedded in the main area
     @State private var showSettings = false
+    @State private var showHelp = false               // 快捷键帮助面板
     @State private var showOpenPath = false          // Cmd+Shift+O quick-open
     @State private var pathInput = ""
     @State private var pathSel = 0
@@ -1228,6 +1229,7 @@ struct ContentView: View {
                         onCancel: { renameTarget = nil })
         }
         .sheet(isPresented: $showSettings) { SettingsSheet() }
+        .sheet(isPresented: $showHelp) { HelpSheet() }
         .onReceive(NotificationCenter.default.publisher(for: .leaderCloseActive)) { _ in
             // Target the embedded session in the main pane; else fall back to the
             // sidebar-SELECTED row if its terminal is open (e.g. selecting in 活跃
@@ -1596,6 +1598,7 @@ struct ContentView: View {
             iconButton(grouped ? "folder.fill" : "clock",
                        grouped ? "按文件夹分组(点切最近使用)" : "按最近使用(点切分组)",
                        grouped ? Color.accentColor : Color.secondary) { grouped.toggle() }
+            iconButton("questionmark.circle", "快捷键帮助", Color.secondary) { showHelp = true }
             iconButton("gearshape", "设置(代理等)", Color.secondary) { showSettings = true }
             iconButton(pinned ? "pin.fill" : "pin", "窗口置顶",
                        pinned ? Color.accentColor : Color.secondary, action: togglePin)
@@ -1763,6 +1766,88 @@ struct RenameSheet: View {
         }
         .padding(16).frame(width: 320)
         .onAppear { DispatchQueue.main.async { focused = true } }
+    }
+}
+
+// MARK: - 快捷键帮助面板
+struct HelpSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("快捷键").font(.headline).padding(.bottom, 12)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    section("全局(任意位置,含终端内)", [
+                        (["⌘", "K"], "命令面板 — 搜索会话、执行会话操作(⌘F 同义)"),
+                        (["⌘", "1"], "切到「活跃」标签"),
+                        (["⌘", "2"], "切到「会话」标签"),
+                        (["⌘", "3"], "切到「陈旧」标签"),
+                        (["⌘", "4"], "切到「已归档」标签"),
+                        (["⌘", "⇧", "O"], "快速打开 — 输入目录,回车新建会话"),
+                        (["⌃", "⌃"], "呼出 / 收起临时终端(双击 Control)"),
+                        (["⌘", "W"], "关闭当前嵌入会话(需确认;不关窗口)"),
+                        (["⌘", "Q"], "退出 Leader(有会话在运行时会确认)"),
+                    ])
+                    section("侧边栏列表", [
+                        (["↑"], "上移选中"),
+                        (["↓"], "下移选中"),
+                        (["↩"], "打开选中的会话"),
+                    ])
+                    section("命令面板(⌘K 打开后)", [
+                        (["↑", "↓"], "移动选中"),
+                        (["⇥"], "进入该会话的操作列表"),
+                        (["↩"], "打开会话 / 执行操作"),
+                        (["⎋"], "返回上一层 / 关闭"),
+                    ])
+                    section("快速打开(⌘⇧O 打开后)", [
+                        (["↑", "↓"], "在候选目录间移动"),
+                        (["⇥"], "补全到选中的目录"),
+                        (["↩"], "打开输入目录(或选中候选)新建会话"),
+                        (["⎋"], "关闭"),
+                    ])
+                    section("临时终端呼出时", [
+                        (["⌘", "K"], "交给终端清屏,不再拉起命令面板"),
+                        (["⌘", "1–4"], "切换标签 — 暂时禁用"),
+                        (["⌘", "⇧", "O"], "快速打开 — 暂时禁用"),
+                    ])
+                    Text("提示:每行右侧的 ••• 菜单(或右键)可对单个会话执行 置顶 / 标记未读 / 重命名 / 归档。")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).padding(.top, 2)
+                }
+                .padding(.trailing, 4)
+            }
+            .frame(maxHeight: 440)
+            HStack {
+                Spacer()
+                Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 14)
+        }
+        .padding(18).frame(width: 470)
+    }
+
+    @ViewBuilder private func section(_ title: String,
+                                      _ rows: [(keys: [String], desc: String)]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.subheadline).bold().foregroundStyle(.secondary)
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    HStack(spacing: 4) {
+                        ForEach(Array(r.keys.enumerated()), id: \.offset) { _, k in keyCap(k) }
+                    }
+                    .frame(width: 92, alignment: .leading)
+                    Text(r.desc).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+    private func keyCap(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.primary.opacity(0.12)))
     }
 }
 

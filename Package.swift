@@ -15,12 +15,17 @@ let package = Package(
         // point back at the upstream tag and rename `tv.lineHeightMultiplier` ->
         // `tv.lineSpacing` in EmbeddedTerminal.swift (applyTermTheme).
         .package(url: "https://github.com/Coiggahou2002/SwiftTerm.git",
-                 revision: "d59975b82d12d3a1e2d4f624a78c3621a4e33b35")
+                 revision: "d59975b82d12d3a1e2d4f624a78c3621a4e33b35"),
+        // In-app auto-update (appcast on GitHub Releases). Sparkle ships as a
+        // binary XCFramework; build.sh embeds Sparkle.framework into the bundle
+        // and adds the @executable_path/../Frameworks rpath (swift build alone
+        // does not embed it into a hand-assembled .app).
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
     ],
     targets: [
         .executableTarget(
             name: "Leader",
-            dependencies: ["SwiftTerm"],
+            dependencies: ["SwiftTerm", .product(name: "Sparkle", package: "Sparkle")],
             path: "src",
             // src/ also holds the python backend, the icon generator, and helper
             // scripts — only LeaderApp.swift is compiled into the app.

@@ -658,13 +658,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // so the default File→Close never fires. Cmd+Q still quits (its own confirm).
     func installKeyMonitor() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
-            // Only plain Cmd (no other modifiers), else let chords through.
-            guard e.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command]
-            else { return e }
-            switch e.charactersIgnoringModifiers?.lowercased() {
-            case "w":
+            let mods = e.modifierFlags.intersection([.command, .control, .option, .shift])
+            let key = e.charactersIgnoringModifiers?.lowercased()
+
+            // Cmd+W is ALWAYS repurposed to "close the active session" and swallowed,
+            // so it can never close the window / quit the app — scratch terminal or
+            // not. (Handled in ContentView with a confirm.) Cmd+Q still quits.
+            if mods == [.command], key == "w" {
                 NotificationCenter.default.post(name: .leaderCloseActive, object: nil)
-                return nil                            // swallow so File→Close never fires
+                return nil
+            }
+
+            // While the double-tap-Ctrl scratch terminal is up it OWNS the keyboard:
+            // Leader's global chords must not steer the main window hidden behind it.
+            // Let Cmd+K/Cmd+F reach the terminal (its clear-scrollback) instead of
+            // opening the palette, and disable tab-switch (Cmd+1..4) and quick-open
+            // (Cmd+Shift+O) entirely until it's dismissed (⌃⌃ again or ✕).
+            let quakeUp = MainActor.assumeIsolated { QuakeTerminal.shared.isVisible }
+            if quakeUp {
+                if mods == [.command], let k = key, ["1", "2", "3", "4"].contains(k) { return nil }
+                if mods == [.command, .shift], key == "o" { return nil }
+                return e
+            }
+
+            // Only plain Cmd (no other modifiers), else let chords through.
+            guard mods == [.command] else { return e }
+            switch key {
             case "k", "f":
                 // Command palette (session search + per-session actions). Claimed
                 // globally so it opens even while an embedded terminal has key focus;
@@ -882,9 +901,11 @@ struct ContentView: View {
     @State private var selectedID: String?
     @State private var activeSID: String?            // session embedded in the main area
     @State private var showSettings = false
+    @State private var showHelp = false               // 快捷键帮助面板
     @State private var showOpenPath = false          // Cmd+Shift+O quick-open
     @State private var pathInput = ""
     @State private var pathSel = 0
+    @State private var pathCands: [String] = []      // dir completions, scanned off-main per input change
     @State private var confirmCloseActive = false    // Cmd+W confirm
     @State private var closeTarget: (sid: String, name: String)?   // what Cmd+W will close
     // Cmd+K command palette. Two levels: nil paletteActionsFor = session search;
@@ -965,45 +986,63 @@ struct ContentView: View {
     private func promptOpenPath() {
         pathInput = "~/dev/"      // most sessions live here; user can clear it
         pathSel = 0
+        pathCands = []
         showOpenPath = true
+        refreshPathCandidates()   // seed completions (onChange won't fire if input is unchanged)
         DispatchQueue.main.async { focus = .openPath }
     }
     private func prettyPath(_ p: String) -> String {
         let home = NSHomeDirectory()
         return p.hasPrefix(home) ? "~" + p.dropFirst(home.count) : p
     }
+    // Rescan directory completions for the current input, OFF the main thread.
+    // The scan is filesystem I/O (contentsOfDirectory + a stat per entry) and used
+    // to run synchronously inside the overlay's view body — so it re-fired on every
+    // body invalidation (each keystroke, every hover flip, the 6 s scan.py refresh),
+    // blocking the field. Now it runs only when the typed path changes, results are
+    // cached in `pathCands`, and a staleness guard drops out-of-order responses.
+    private func refreshPathCandidates() {
+        let input = pathInput
+        Task.detached(priority: .userInitiated) {
+            let cands = Self.pathCandidates(input)
+            await MainActor.run { if input == pathInput { pathCands = cands } }
+        }
+    }
     // Directories under the typed path's parent whose name matches the last
-    // component. Hidden dirs shown only when the user is typing a dot.
-    private func pathCandidates(_ input: String) -> [String] {
+    // component. Hidden dirs shown only when the user is typing a dot. Pure +
+    // static so refreshPathCandidates can call it off-main without capturing self;
+    // uses a private FileManager and reads .isDirectoryKey from the enumeration
+    // (one pass) instead of a second fileExists() stat per entry.
+    private nonisolated static func pathCandidates(_ input: String) -> [String] {
         guard !input.isEmpty else { return [] }
         let ns = (input as NSString).expandingTildeInPath
-        let fm = FileManager.default
         let dir: String, prefix: String
         if input.hasSuffix("/") { dir = ns; prefix = "" }
         else { dir = (ns as NSString).deletingLastPathComponent; prefix = (ns as NSString).lastPathComponent }
         let base = dir.isEmpty ? "/" : dir
-        guard let entries = try? fm.contentsOfDirectory(atPath: base) else { return [] }
+        let fm = FileManager()
+        guard let urls = try? fm.contentsOfDirectory(
+                at: URL(fileURLWithPath: base, isDirectory: true),
+                includingPropertiesForKeys: [.isDirectoryKey], options: []) else { return [] }
         let showHidden = prefix.hasPrefix(".")
-        return entries.filter { e in
-            (showHidden || !e.hasPrefix(".")) &&
-            (prefix.isEmpty || e.lowercased().hasPrefix(prefix.lowercased()))
-        }.filter { e in
-            var isDir: ObjCBool = false
-            fm.fileExists(atPath: (base as NSString).appendingPathComponent(e), isDirectory: &isDir)
-            return isDir.boolValue
-        }.sorted().prefix(8).map { (base as NSString).appendingPathComponent($0) }
+        let lower = prefix.lowercased()
+        return urls.filter { url in
+            let name = url.lastPathComponent
+            guard showHidden || !name.hasPrefix(".") else { return false }
+            guard prefix.isEmpty || name.lowercased().hasPrefix(lower) else { return false }
+            return (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+        }.map(\.path).sorted().prefix(8).map { $0 }
     }
     // Enter: open the typed dir if it exists, else the highlighted/first candidate.
     private func commitOpenPath() {
         let expanded = (pathInput as NSString).expandingTildeInPath
-        let cands = pathCandidates(pathInput)
         var isDir: ObjCBool = false
         var target: String?
         if !pathInput.isEmpty,
            FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir), isDir.boolValue {
             target = expanded
-        } else if pathSel < cands.count { target = cands[pathSel] }
-        else { target = cands.first }
+        } else if pathSel < pathCands.count { target = pathCands[pathSel] }
+        else { target = pathCands.first }
         guard let t = target else { store.flash("路径不存在"); return }
         showOpenPath = false
         focus = .list
@@ -1190,6 +1229,7 @@ struct ContentView: View {
                         onCancel: { renameTarget = nil })
         }
         .sheet(isPresented: $showSettings) { SettingsSheet() }
+        .sheet(isPresented: $showHelp) { HelpSheet() }
         .onReceive(NotificationCenter.default.publisher(for: .leaderCloseActive)) { _ in
             // Target the embedded session in the main pane; else fall back to the
             // sidebar-SELECTED row if its terminal is open (e.g. selecting in 活跃
@@ -1231,8 +1271,18 @@ struct ContentView: View {
         // Unmount the terminal view FIRST (activeSID=nil → terminalArea shows the
         // empty state, TerminalContainer leaves the tree), so nothing can re-run
         // its updateNSView and re-spawn the terminal we're about to kill.
-        if activeSID == sid { activeSID = nil }
-        if pendingNew?.sid == sid { pendingNew = nil }
+        //
+        // Do the swap with animations DISABLED: Cmd+W runs this from inside the
+        // confirmationDialog's "关闭会话" button, so the mutation would otherwise
+        // inherit the dialog's dismissal transaction and SwiftUI would animate the
+        // activeEmbed→nil branch swap — the terminal fades to transparent while the
+        // empty-state placeholder scales up. We want an instant cut to the empty state.
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            if activeSID == sid { activeSID = nil }
+            if pendingNew?.sid == sid { pendingNew = nil }
+        }
         TerminalManager.shared.close(sid)
         store.markTerminalClosed(sid)     // drop from 活跃 immediately, then reconcile
     }
@@ -1283,31 +1333,30 @@ struct ContentView: View {
             ZStack(alignment: .top) {
                 Color.black.opacity(0.28).ignoresSafeArea()
                     .onTapGesture { showOpenPath = false; focus = .list }
-                let cands = pathCandidates(pathInput)
                 VStack(spacing: 0) {
                     HStack(spacing: 10) {
                         Image(systemName: "folder").foregroundStyle(.secondary)
                         TextField("输入目录路径,回车新建会话", text: $pathInput)
                             .textFieldStyle(.plain).font(.title3)
                             .focused($focus, equals: .openPath)
-                            .onChange(of: pathInput) { _, _ in pathSel = 0 }
+                            .onChange(of: pathInput) { _, _ in pathSel = 0; refreshPathCandidates() }
                             .onSubmit { commitOpenPath() }
                             .onKeyPress(.downArrow) {
-                                if !cands.isEmpty { pathSel = min(pathSel + 1, cands.count - 1) }
+                                if !pathCands.isEmpty { pathSel = min(pathSel + 1, pathCands.count - 1) }
                                 return .handled
                             }
                             .onKeyPress(.upArrow) { pathSel = max(pathSel - 1, 0); return .handled }
                             .onKeyPress(.tab) {
-                                if pathSel < cands.count { pathInput = cands[pathSel] + "/"; pathSel = 0 }
+                                if pathSel < pathCands.count { pathInput = pathCands[pathSel] + "/"; pathSel = 0 }
                                 return .handled
                             }
                     }
                     .padding(14)
-                    if !cands.isEmpty {
+                    if !pathCands.isEmpty {
                         Divider()
                         ScrollView {
                             VStack(spacing: 0) {
-                                ForEach(Array(cands.enumerated()), id: \.element) { i, c in
+                                ForEach(Array(pathCands.enumerated()), id: \.element) { i, c in
                                     HStack(spacing: 8) {
                                         Image(systemName: "folder.fill").font(.caption).foregroundStyle(.tertiary)
                                         Text(prettyPath(c)).lineLimit(1)
@@ -1549,6 +1598,7 @@ struct ContentView: View {
             iconButton(grouped ? "folder.fill" : "clock",
                        grouped ? "按文件夹分组(点切最近使用)" : "按最近使用(点切分组)",
                        grouped ? Color.accentColor : Color.secondary) { grouped.toggle() }
+            iconButton("questionmark.circle", "快捷键帮助", Color.secondary) { showHelp = true }
             iconButton("gearshape", "设置(代理等)", Color.secondary) { showSettings = true }
             iconButton(pinned ? "pin.fill" : "pin", "窗口置顶",
                        pinned ? Color.accentColor : Color.secondary, action: togglePin)
@@ -1716,6 +1766,88 @@ struct RenameSheet: View {
         }
         .padding(16).frame(width: 320)
         .onAppear { DispatchQueue.main.async { focused = true } }
+    }
+}
+
+// MARK: - 快捷键帮助面板
+struct HelpSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("快捷键").font(.headline).padding(.bottom, 12)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    section("全局(任意位置,含终端内)", [
+                        (["⌘", "K"], "命令面板 — 搜索会话、执行会话操作(⌘F 同义)"),
+                        (["⌘", "1"], "切到「活跃」标签"),
+                        (["⌘", "2"], "切到「会话」标签"),
+                        (["⌘", "3"], "切到「陈旧」标签"),
+                        (["⌘", "4"], "切到「已归档」标签"),
+                        (["⌘", "⇧", "O"], "快速打开 — 输入目录,回车新建会话"),
+                        (["⌃", "⌃"], "呼出 / 收起临时终端(双击 Control)"),
+                        (["⌘", "W"], "关闭当前嵌入会话(需确认;不关窗口)"),
+                        (["⌘", "Q"], "退出 Leader(有会话在运行时会确认)"),
+                    ])
+                    section("侧边栏列表", [
+                        (["↑"], "上移选中"),
+                        (["↓"], "下移选中"),
+                        (["↩"], "打开选中的会话"),
+                    ])
+                    section("命令面板(⌘K 打开后)", [
+                        (["↑", "↓"], "移动选中"),
+                        (["⇥"], "进入该会话的操作列表"),
+                        (["↩"], "打开会话 / 执行操作"),
+                        (["⎋"], "返回上一层 / 关闭"),
+                    ])
+                    section("快速打开(⌘⇧O 打开后)", [
+                        (["↑", "↓"], "在候选目录间移动"),
+                        (["⇥"], "补全到选中的目录"),
+                        (["↩"], "打开输入目录(或选中候选)新建会话"),
+                        (["⎋"], "关闭"),
+                    ])
+                    section("临时终端呼出时", [
+                        (["⌘", "K"], "交给终端清屏,不再拉起命令面板"),
+                        (["⌘", "1–4"], "切换标签 — 暂时禁用"),
+                        (["⌘", "⇧", "O"], "快速打开 — 暂时禁用"),
+                    ])
+                    Text("提示:每行右侧的 ••• 菜单(或右键)可对单个会话执行 置顶 / 标记未读 / 重命名 / 归档。")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).padding(.top, 2)
+                }
+                .padding(.trailing, 4)
+            }
+            .frame(maxHeight: 440)
+            HStack {
+                Spacer()
+                Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 14)
+        }
+        .padding(18).frame(width: 470)
+    }
+
+    @ViewBuilder private func section(_ title: String,
+                                      _ rows: [(keys: [String], desc: String)]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.subheadline).bold().foregroundStyle(.secondary)
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    HStack(spacing: 4) {
+                        ForEach(Array(r.keys.enumerated()), id: \.offset) { _, k in keyCap(k) }
+                    }
+                    .frame(width: 92, alignment: .leading)
+                    Text(r.desc).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+    private func keyCap(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.primary.opacity(0.12)))
     }
 }
 

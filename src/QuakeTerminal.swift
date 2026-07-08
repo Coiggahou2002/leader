@@ -38,6 +38,10 @@ final class QuakeTerminal: NSObject {
     private var panel: QuakePanel?
     private var term: EmbeddedTerminalView?
     private var visible = false
+    // Read by the app-wide key monitor (installKeyMonitor) to suppress Leader's
+    // global ⌘ chords while the scratch terminal owns the keyboard: ⌘K/⌘F fall
+    // through to the terminal, ⌘1-4 / ⌘⇧O are disabled.
+    var isVisible: Bool { visible }
     private var lastCtrlPress: TimeInterval = 0
     private static let doubleTapWindow: TimeInterval = 0.4   // seconds
 

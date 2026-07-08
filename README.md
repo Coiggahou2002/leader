@@ -13,9 +13,7 @@
 
 </div>
 
-<!-- Drop a screenshot at docs/screenshot.png and uncomment:
 <p align="center"><img src="docs/screenshot.png" width="800" alt="Leader main window"></p>
--->
 
 ---
 

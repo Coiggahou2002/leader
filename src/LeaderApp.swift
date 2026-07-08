@@ -747,6 +747,9 @@ struct Row: View {
     var onRename: () -> Void = {}
     var onMarkUnread: () -> Void = {}
     var selected: Bool = false
+    // The embedded-terminal badge is redundant in the 活跃 tab (every row there is,
+    // by definition, term.running) — that list passes false to hide it.
+    var showEmbedBadge: Bool = true
     @Binding var hoveredID: String?
     @ObservedObject var term = TerminalManager.shared   // embed state (running/exited)
     @ObservedObject var activity = Activity.shared       // turn-completion pulse
@@ -774,7 +777,7 @@ struct Row: View {
             Text(s.name).font(.system(size: 14)).lineLimit(1)
                 .workingShimmer(isWorking)
             if s.unread { UnreadBadge() }
-            if let sym = embedSymbol {
+            if showEmbedBadge, let sym = embedSymbol {
                 Image(systemName: sym).font(.caption2).foregroundStyle(.secondary)
                     .help(sym == "terminal.fill" ? "已嵌入运行" : "已嵌入(进程已退出)")
             }
@@ -1621,12 +1624,12 @@ struct ContentView: View {
         }
     }
 
-    private func sessionRow(_ s: Session) -> some View {
+    private func sessionRow(_ s: Session, showEmbedBadge: Bool = true) -> some View {
         Row(s: s,
             onOpen: { openEmbedded(s) }, onArchive: { store.setArchived(s, !s.archived) },
             onPin: { store.setPinned(s, !s.pinned) }, onRename: { beginRename(s) },
             onMarkUnread: { store.setUnread(s, !s.unread) },
-            selected: selectedID == s.id, hoveredID: $hoveredID)
+            selected: selectedID == s.id, showEmbedBadge: showEmbedBadge, hoveredID: $hoveredID)
     }
 
     @ViewBuilder private var liveContent: some View {
@@ -1638,7 +1641,7 @@ struct ContentView: View {
                 .padding(.top, 40)
         } else {
             SectionHeader(title: "活跃", n: items.count, icon: "terminal")
-            ForEach(items) { s in sessionRow(s) }
+            ForEach(items) { s in sessionRow(s, showEmbedBadge: false) }
         }
     }
 

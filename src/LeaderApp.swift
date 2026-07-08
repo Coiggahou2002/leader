@@ -695,7 +695,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         w.backgroundColor = .clear
         w.styleMask.insert(.fullSizeContentView)
         applyLevel()
-        centerWindow()
+        // Deliberately NO frame code here — see applicationDidFinishLaunching. SwiftUI
+        // owns the window frame and restores it; first-launch size is .defaultSize.
     }
     func applyLevel() {
         guard let w = window ?? NSApp.windows.first else { return }
@@ -703,17 +704,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         w.level = AppDelegate.pinned ? .floating : .normal
         w.collectionBehavior = AppDelegate.pinned
             ? [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary] : [.managed]
-    }
-    func centerWindow() {
-        guard let w = window, let scr = NSScreen.main else { return }
-        let vf = scr.visibleFrame
-        // A comfortable centered size (not full-height, not left-snapped).
-        let width = min(1200, vf.width * 0.82)
-        let height = min(820, vf.height * 0.86)
-        let x = vf.minX + (vf.width - width) / 2
-        let y = vf.minY + (vf.height - height) / 2
-        w.setFrame(NSRect(x: x, y: y, width: width, height: height),
-                   display: true, animate: false)
     }
     // Quitting kills every embedded claude. Confirm if any session is live so a
     // stray Cmd+Q doesn't tear down running work.
@@ -1844,6 +1834,7 @@ struct LeaderApp: App {
     var body: some Scene {
         WindowGroup { ContentView() }
             .windowStyle(.hiddenTitleBar)              // traffic lights float over content; no titlebar band
+            .defaultSize(width: 1200, height: 800)     // first launch only; SwiftUI persists later resizes
             .windowResizability(.contentMinSize)
     }
 }

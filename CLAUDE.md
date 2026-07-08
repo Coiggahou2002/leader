@@ -5,6 +5,55 @@ Native macOS cockpit for many Claude Code sessions. SwiftUI shell (`src/LeaderAp
 (`src/*.py`, bundled into the app). Build+install: `./build.sh` → `dist/Leader.app`,
 then `rm -rf ~/Applications/Leader.app && cp -R dist/Leader.app ~/Applications/`.
 
+## Shipping releases (Sparkle auto-update + CI)
+
+The app updates itself via **Sparkle**: it reads an appcast from GitHub Releases
+(`SUFeedURL` = `.../releases/latest/download/appcast.xml`, baked into Info.plist by
+`build.sh`) and installs new versions in place. Updates are trusted by an **EdDSA
+signature**, so the app stays **ad-hoc signed** — no Apple Developer account.
+
+**Versioning.** `build.sh` stamps the version from `$LEADER_VERSION` (set by CI from
+the tag) → else `./VERSION` → else `1.0`. Sparkle compares `CFBundleVersion`, so every
+release **must be a strictly higher version than the last** or existing installs won't
+see it. Keep `./VERSION` in sync with the tag you cut.
+
+**Cutting a release — CI (preferred).** Push a tag and GitHub Actions
+(`.github/workflows/release.yml`) does the rest:
+```
+# bump ./VERSION to match, commit, then:
+git tag v1.2 && git push origin v1.2
+```
+The workflow builds on a `macos-14` (arm64) runner, ad-hoc-signs, regenerates the
+signed appcast, and publishes the Release via the built-in `GITHUB_TOKEN`. The tag
+**is** the version (leading `v` stripped). You can also trigger it manually:
+`gh workflow run release.yml -f version=1.2`.
+- **Merging to `main` does NOT release.** Only a `v*` tag push (or manual dispatch)
+  does — this is deliberate, so ordinary merges don't ship versions.
+
+**Cutting a release — local fallback.** Bump `./VERSION`, then `./release.sh` (build →
+zip → sign appcast → `gh release create`). Locally the signing key is read from the
+login keychain; no env var needed.
+
+**The signing key (EdDSA).** Local: generated once by Sparkle's `generate_keys`, lives
+in the login keychain. CI: stored as the repo secret **`SPARKLE_ED_PRIVATE_KEY`** (the
+base64 blob from `generate_keys -x`), fed to `generate_appcast --ed-key-file -` over
+**stdin** so it never touches disk. Only tag-push / manual-dispatch runs get the secret
+(fork PRs don't). **Back the key up — losing it bricks auto-update for every existing
+install.** The matching public key is hardcoded as `PUBKEY` in `build.sh` (→
+`SUPublicEDKey`); rotating the key means updating `PUBKEY`, and old installs will reject
+updates signed by the new key.
+
+**Do not break the bundle-signing order in `build.sh`.** It embeds the universal
+`Sparkle.framework` into `Contents/Frameworks`, adds the `@executable_path/../Frameworks`
+rpath, then signs the nested Sparkle helpers (XPCServices, Autoupdate, Updater.app)
+inside-out **before** signing the framework and the app. Ad-hoc-signing the app with
+`--deep` instead is unreliable for the XPC services.
+
+**First-install caveat.** A freshly *downloaded* build is quarantined, so its first
+launch needs a one-time Gatekeeper bypass (right-click → Open, or
+`xattr -dr com.apple.quarantine Leader.app`). Sparkle strips quarantine on the updates
+it installs, so every subsequent auto-update relaunches cleanly.
+
 ## Hard-won lessons (read before touching sidebar / terminal state)
 
 These are not style preferences. Each one cost a full debug cycle. The sidebar has

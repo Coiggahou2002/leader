@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-"""leader/scan.py — read-only fleet situational board.
+"""leader/scan.py — read-only fleet scanner (the JSON backend for the Leader app).
 
-Scans ~/.claude/projects/*/*.jsonl session transcripts + git worktrees and
-buckets every session into (b) can-wait / (c) reap. (The old (a) needs-you
-tier and its yellow row hints were removed — every heuristic fired too often
-and the bucket was pure noise.)
+Scans ~/.claude/projects/*/*.jsonl session transcripts + git worktrees, buckets
+every session into (b) can-wait / (c) reap, and prints the fleet as JSON on
+stdout — the app's sole data source.
 
 Pure stdlib, read-only. Tunable thresholds live in CONFIG below.
-Usage:  python3 scan.py [--repo SUBSTR] [--all] [--json]
-  --repo SUBSTR : only sessions whose cwd contains SUBSTR (default: show all,
-                  but rank impl/prdsophon first)
+Usage:  python3 scan.py [--repo SUBSTR] [--all]   # always prints JSON
+  --repo SUBSTR : only sessions whose cwd contains SUBSTR
   --all         : include the long tail of unrelated projects
-  --json        : machine-readable output (for the Leader agent to consume)
 """
 from __future__ import annotations
 import json, os, sys, time, subprocess, glob, re
-from datetime import datetime, timezone
+from datetime import datetime
 import config
 
 # ---- tunable thresholds (the priority rules, in one place) -----------------
@@ -220,33 +217,23 @@ def digest(path: str) -> dict:
     return d
 
 # ---- bucketing (apply the rules) -------------------------------------------
-# There is deliberately NO "needs you" tier anymore: every transcript heuristic
-# we tried (answered-and-asking, unpushed commits, bad-state tails) fired far
-# too often, so the tier and its yellow row hints were removed. Attention now
-# comes from the live hook signals in the app (shimmer / breathing dot /
-# unread), not transcript archaeology. `why` remains for the CLI view.
-def classify(d: dict) -> tuple[str, list[str]]:
+# There is deliberately NO "needs you" tier: every transcript heuristic we tried
+# (answered-and-asking, unpushed commits, bad-state tails) fired far too often,
+# so it was removed. Attention now comes from the live hook signals in the app
+# (shimmer / breathing dot / unread), not transcript archaeology. Only the bucket
+# (b/c) is kept — purely to order sessions within a list.
+def classify(d: dict) -> str:
     c = CONFIG
     idle_d = d["idle_h"] / 24
-    # finished turn AND it actually asked you something = genuinely waiting on you
-    ball_in_your_court = (d["last_role"] == "assistant"
-                          and d["last_stop"] in (None, "end_turn")
-                          and d["asks"])
-
-    # (c) reap ---------------------------------------------------------------
+    # (c) reap: long-idle, or a near-empty session left sitting
     if idle_d > c["reap_days"]:
-        return "c", [f"{idle_d:.0f}d 没动"]
+        return "c"
     if d["msgs"] < c["tiny_msgs"] and idle_d > c["tiny_idle_days"]:
-        return "c", [f"空会话({d['msgs']}条) + {idle_d:.0f}d 没动"]
+        return "c"
+    # (b) everything else can wait
+    return "b"
 
-    # (b) can wait -----------------------------------------------------------
-    if ball_in_your_court:
-        return "b", [f"待你回复 {idle_d:.0f}d"]
-    if idle_d <= c["canwait_days"]:
-        return "b", ["近期活跃、无阻塞信号"]
-    return "b", [f"{idle_d:.0f}d 没动(临界)"]
-
-# ---- collect (shared by CLI + app) -----------------------------------------
+# ---- collect ---------------------------------------------------------------
 def _flag_set(name: str) -> set:
     try:
         return set(json.load(open(config.data_file(f"{name}.json"))).get("sids", []))
@@ -281,7 +268,7 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
         if repo_filter and repo_filter not in cwd:
             continue
         wt = wt_all.get(cwd)
-        bucket, why = classify(d)
+        bucket = classify(d)
         full_sid = os.path.basename(d["file"])[:-6]
         # "alive" = exactly identified as running (only --resume/hook sessions).
         # cwd-sibling liveness is too fuzzy to label a specific session active.
@@ -292,7 +279,7 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
             where = f"↻ 同目录另有 {len(cwd2ttys[cwd])} 个活 pane"
         else:
             where = "⚪ 已关"
-        d.update(bucket=bucket, why=why, wt=wt, full_sid=full_sid,
+        d.update(bucket=bucket, wt=wt, full_sid=full_sid,
                  alive=alive, where=where, archived=full_sid in archived,
                  pinned=full_sid in pin_idx, pin_order=pin_idx.get(full_sid),
                  unread=full_sid in unread, nickname=names.get(full_sid))
@@ -317,48 +304,11 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
 def main():
     args = sys.argv[1:]
     show_all = "--all" in args
-    as_json = "--json" in args
     repo_filter = None
     if "--repo" in args:
         repo_filter = args[args.index("--repo") + 1]
     sessions = collect(repo_filter, show_all)
-
-    if as_json:
-        print(json.dumps(sessions, ensure_ascii=False, default=str))
-        return
-
-    # zombie agent-* worktrees (always reap candidates, counted separately)
-    agent_trees = []
-    for repo in config.worktree_repos():
-        agent_trees += glob.glob(os.path.join(repo, ".claude/worktrees/agent-*"))
-
-    labels = {"b": "🟡 (b) 可缓 — 有空再看",
-              "c": "⚪ (c) 僵死 — 建议关/清"}
-    def fmt(d):
-        cwd = config.short_path(d.get("cwd") or "?")
-        title = d.get("title") or (d.get("last_prompt") or "(无标题)")
-        idle = d["idle_h"]
-        ago = f"{idle:.0f}h" if idle < 48 else f"{idle/24:.0f}d"
-        tok = f"{d['out_tok']//1000}k" if d["out_tok"] >= 1000 else str(d["out_tok"])
-        return (f"  · [{d['sid']}] {title[:44]}  {d.get('where','')}\n"
-                f"      {cwd}@{d.get('branch') or '?'} | {ago}前 | "
-                f"{d['msgs']}条/{tok}tok | {' ; '.join(d['why'])}")
-
-    print(f"\n{'='*70}\n  FLEET 态势板  ({datetime.now():%m-%d %H:%M}) — "
-          f"{len(sessions)} 个相关会话\n{'='*70}")
-    for b in ("b", "c"):
-        grp = [s for s in sessions if s["bucket"] == b]
-        print(f"\n{labels[b]}  ({len(grp)})")
-        for d in grp[:15 if b != 'c' else 8]:
-            print(fmt(d))
-        if b == "c" and len(grp) > 8:
-            print(f"      … 还有 {len(grp)-8} 个")
-    if agent_trees:
-        print(f"\n{'─'*70}")
-        print(f"  🧟 残留 agent-* worktree: {len(agent_trees)} 个 —— 可清(占盘+干扰 worktree list)")
-        for repo in config.worktree_repos():
-            print(f"     git -C {config.short_path(repo)} worktree prune  (先 --dry-run)")
-    print(f"{'='*70}\n")
+    print(json.dumps(sessions, ensure_ascii=False, default=str))
 
 if __name__ == "__main__":
     main()

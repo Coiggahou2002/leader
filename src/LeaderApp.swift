@@ -885,6 +885,7 @@ struct ContentView: View {
     @State private var showOpenPath = false          // Cmd+Shift+O quick-open
     @State private var pathInput = ""
     @State private var pathSel = 0
+    @State private var pathCands: [String] = []      // dir completions, scanned off-main per input change
     @State private var confirmCloseActive = false    // Cmd+W confirm
     @State private var closeTarget: (sid: String, name: String)?   // what Cmd+W will close
     // Cmd+K command palette. Two levels: nil paletteActionsFor = session search;
@@ -965,45 +966,63 @@ struct ContentView: View {
     private func promptOpenPath() {
         pathInput = "~/dev/"      // most sessions live here; user can clear it
         pathSel = 0
+        pathCands = []
         showOpenPath = true
+        refreshPathCandidates()   // seed completions (onChange won't fire if input is unchanged)
         DispatchQueue.main.async { focus = .openPath }
     }
     private func prettyPath(_ p: String) -> String {
         let home = NSHomeDirectory()
         return p.hasPrefix(home) ? "~" + p.dropFirst(home.count) : p
     }
+    // Rescan directory completions for the current input, OFF the main thread.
+    // The scan is filesystem I/O (contentsOfDirectory + a stat per entry) and used
+    // to run synchronously inside the overlay's view body — so it re-fired on every
+    // body invalidation (each keystroke, every hover flip, the 6 s scan.py refresh),
+    // blocking the field. Now it runs only when the typed path changes, results are
+    // cached in `pathCands`, and a staleness guard drops out-of-order responses.
+    private func refreshPathCandidates() {
+        let input = pathInput
+        Task.detached(priority: .userInitiated) {
+            let cands = Self.pathCandidates(input)
+            await MainActor.run { if input == pathInput { pathCands = cands } }
+        }
+    }
     // Directories under the typed path's parent whose name matches the last
-    // component. Hidden dirs shown only when the user is typing a dot.
-    private func pathCandidates(_ input: String) -> [String] {
+    // component. Hidden dirs shown only when the user is typing a dot. Pure +
+    // static so refreshPathCandidates can call it off-main without capturing self;
+    // uses a private FileManager and reads .isDirectoryKey from the enumeration
+    // (one pass) instead of a second fileExists() stat per entry.
+    private nonisolated static func pathCandidates(_ input: String) -> [String] {
         guard !input.isEmpty else { return [] }
         let ns = (input as NSString).expandingTildeInPath
-        let fm = FileManager.default
         let dir: String, prefix: String
         if input.hasSuffix("/") { dir = ns; prefix = "" }
         else { dir = (ns as NSString).deletingLastPathComponent; prefix = (ns as NSString).lastPathComponent }
         let base = dir.isEmpty ? "/" : dir
-        guard let entries = try? fm.contentsOfDirectory(atPath: base) else { return [] }
+        let fm = FileManager()
+        guard let urls = try? fm.contentsOfDirectory(
+                at: URL(fileURLWithPath: base, isDirectory: true),
+                includingPropertiesForKeys: [.isDirectoryKey], options: []) else { return [] }
         let showHidden = prefix.hasPrefix(".")
-        return entries.filter { e in
-            (showHidden || !e.hasPrefix(".")) &&
-            (prefix.isEmpty || e.lowercased().hasPrefix(prefix.lowercased()))
-        }.filter { e in
-            var isDir: ObjCBool = false
-            fm.fileExists(atPath: (base as NSString).appendingPathComponent(e), isDirectory: &isDir)
-            return isDir.boolValue
-        }.sorted().prefix(8).map { (base as NSString).appendingPathComponent($0) }
+        let lower = prefix.lowercased()
+        return urls.filter { url in
+            let name = url.lastPathComponent
+            guard showHidden || !name.hasPrefix(".") else { return false }
+            guard prefix.isEmpty || name.lowercased().hasPrefix(lower) else { return false }
+            return (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+        }.map(\.path).sorted().prefix(8).map { $0 }
     }
     // Enter: open the typed dir if it exists, else the highlighted/first candidate.
     private func commitOpenPath() {
         let expanded = (pathInput as NSString).expandingTildeInPath
-        let cands = pathCandidates(pathInput)
         var isDir: ObjCBool = false
         var target: String?
         if !pathInput.isEmpty,
            FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir), isDir.boolValue {
             target = expanded
-        } else if pathSel < cands.count { target = cands[pathSel] }
-        else { target = cands.first }
+        } else if pathSel < pathCands.count { target = pathCands[pathSel] }
+        else { target = pathCands.first }
         guard let t = target else { store.flash("路径不存在"); return }
         showOpenPath = false
         focus = .list
@@ -1293,31 +1312,30 @@ struct ContentView: View {
             ZStack(alignment: .top) {
                 Color.black.opacity(0.28).ignoresSafeArea()
                     .onTapGesture { showOpenPath = false; focus = .list }
-                let cands = pathCandidates(pathInput)
                 VStack(spacing: 0) {
                     HStack(spacing: 10) {
                         Image(systemName: "folder").foregroundStyle(.secondary)
                         TextField("输入目录路径,回车新建会话", text: $pathInput)
                             .textFieldStyle(.plain).font(.title3)
                             .focused($focus, equals: .openPath)
-                            .onChange(of: pathInput) { _, _ in pathSel = 0 }
+                            .onChange(of: pathInput) { _, _ in pathSel = 0; refreshPathCandidates() }
                             .onSubmit { commitOpenPath() }
                             .onKeyPress(.downArrow) {
-                                if !cands.isEmpty { pathSel = min(pathSel + 1, cands.count - 1) }
+                                if !pathCands.isEmpty { pathSel = min(pathSel + 1, pathCands.count - 1) }
                                 return .handled
                             }
                             .onKeyPress(.upArrow) { pathSel = max(pathSel - 1, 0); return .handled }
                             .onKeyPress(.tab) {
-                                if pathSel < cands.count { pathInput = cands[pathSel] + "/"; pathSel = 0 }
+                                if pathSel < pathCands.count { pathInput = pathCands[pathSel] + "/"; pathSel = 0 }
                                 return .handled
                             }
                     }
                     .padding(14)
-                    if !cands.isEmpty {
+                    if !pathCands.isEmpty {
                         Divider()
                         ScrollView {
                             VStack(spacing: 0) {
-                                ForEach(Array(cands.enumerated()), id: \.element) { i, c in
+                                ForEach(Array(pathCands.enumerated()), id: \.element) { i, c in
                                     HStack(spacing: 8) {
                                         Image(systemName: "folder.fill").font(.caption).foregroundStyle(.tertiary)
                                         Text(prettyPath(c)).lineLimit(1)

@@ -597,11 +597,13 @@ struct MouseLayer: NSViewRepresentable {
 
 extension Notification.Name {
     static let leaderCloseActive = Notification.Name("leaderCloseActive")
-    static let leaderFocusSearch = Notification.Name("leaderFocusSearch")
+    static let leaderTogglePalette = Notification.Name("leaderTogglePalette")
+    static let leaderSelectTab = Notification.Name("leaderSelectTab")   // object: Int tab index
+    static let leaderOpenSession = Notification.Name("leaderOpenSession")   // object: String full_sid
 }
 
 // MARK: - 窗口配置 + 置顶
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     static var pinned = false   // window stays normal level; opt-in via the pin toolbar button
     var window: NSWindow?
 
@@ -641,10 +643,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "w":
                 NotificationCenter.default.post(name: .leaderCloseActive, object: nil)
                 return nil                            // swallow so File→Close never fires
-            case "f":
-                // Focus the sidebar search even when a terminal has key focus (it
-                // would otherwise swallow Cmd+F). Swallow so it doesn't reach the shell.
-                NotificationCenter.default.post(name: .leaderFocusSearch, object: nil)
+            case "k", "f":
+                // Command palette (session search + per-session actions). Claimed
+                // globally so it opens even while an embedded terminal has key focus;
+                // the terminal's own Cmd+K (clear scrollback) is sacrificed for it.
+                // Cmd+F is an alias — "find" — now that the sidebar search box is gone.
+                NotificationCenter.default.post(name: .leaderTogglePalette, object: nil)
+                return nil
+            case "1", "2", "3", "4":
+                // Cmd+1..4 → switch the four sidebar tabs (会话/活跃/陈旧/已归档),
+                // even from inside a terminal. Tab index carried on the notification.
+                if let n = e.charactersIgnoringModifiers, let i = Int(n) {
+                    NotificationCenter.default.post(name: .leaderSelectTab, object: i - 1)
+                }
                 return nil
             default:
                 return e
@@ -815,16 +826,25 @@ struct FolderHeader: View {
     }
 }
 
+// MARK: - Command palette (Cmd+K)
+// One action performable from the palette's drill-in level. `run` is invoked AFTER
+// the palette closes, so a follow-up sheet (rename) presents over a clean UI.
+struct PaletteAction: Identifiable {
+    let id: String
+    let title: String
+    let icon: String
+    let run: () -> Void
+}
+
 // MARK: - Main
 struct ContentView: View {
     @State private var store = Store()
     @State private var pinned = false   // window-level always-on-top, opt-in
-    @State private var mode: Mode = .active
+    @State private var mode: Mode = .live
     @State private var hoveredID: String?
     @State private var collapsed: Set<String> = []
     @State private var renameTarget: Session?
     @State private var renameText = ""
-    @State private var query = ""
     @State private var staleExpanded = false
     @State private var selectedID: String?
     @State private var activeSID: String?            // session embedded in the main area
@@ -834,6 +854,13 @@ struct ContentView: View {
     @State private var pathSel = 0
     @State private var confirmCloseActive = false    // Cmd+W confirm
     @State private var closeTarget: (sid: String, name: String)?   // what Cmd+W will close
+    // Cmd+K command palette. Two levels: nil paletteActionsFor = session search;
+    // non-nil = the drill-in action list for that one session. paletteSel indexes
+    // whichever list is active; paletteQuery filters it.
+    @State private var showPalette = false
+    @State private var paletteQuery = ""
+    @State private var paletteSel = 0
+    @State private var paletteActionsFor: Session?
     // A just-created session: embedded immediately at a known sid, before the
     // scanner (every 6s) picks it up into store.sessions.
     @State private var pendingNew: (sid: String, cwd: String)?
@@ -842,21 +869,13 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var scheme
     @ObservedObject private var term = TerminalManager.shared   // 活跃 tab: embed liveness
 
-    enum Focus { case list, search, openPath }
+    enum Focus { case list, openPath, palette }
     // "" -> launch.py uses config.new_session_cwd() (default ~). Configure in
     // ~/.config/leader/config.json -> "new_session_cwd".
     static let newCwd = ""
 
     // ordered sessions currently displayed -> drives ↑/↓ navigation
     private var navList: [Session] {
-        if !query.isEmpty {
-            switch mode {
-            case .active:   return store.sessions.filter { !$0.archived && matches($0) }.sorted(by: Self.byPriority)
-            case .live:     return liveList.filter(matches)
-            case .stale:    return staleList.filter(matches).sorted { $0.idle_h < $1.idle_h }
-            case .archived: return archivedList.filter(matches).sorted(by: Self.byPriority)
-            }
-        }
         switch mode {
         case .active:
             var arr = pinnedList
@@ -956,19 +975,107 @@ struct ContentView: View {
         renameText = s.nickname ?? s.title ?? ""
         renameTarget = s
     }
-    private func matches(_ s: Session) -> Bool {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+    // Substring match over the fields a person would search by — drives the Cmd+K
+    // palette. Includes full_sid so you can paste a raw session id to jump to it.
+    static func sessionMatches(_ s: Session, _ raw: String) -> Bool {
+        let q = raw.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return true }
         return s.name.lowercased().contains(q)
             || (s.title ?? "").lowercased().contains(q)
             || (s.last_prompt ?? "").lowercased().contains(q)
             || s.repo.lowercased().contains(q)
             || (s.branch ?? "").lowercased().contains(q)
-            || s.full_sid.lowercased().contains(q)        // 可直接粘 session id 定位
+            || s.full_sid.lowercased().contains(q)
+    }
+
+    // MARK: Cmd+K palette — data
+    // Level 1: sessions matching the query (all tabs, so you never have to switch
+    // first). Empty query = most-recently-used, so the palette is useful on open.
+    // Capped so ↑/↓ stays snappy on a huge history.
+    private var paletteSessions: [Session] {
+        let q = paletteQuery.trimmingCharacters(in: .whitespaces)
+        let base = q.isEmpty
+            ? store.sessions.filter { !$0.archived }.sorted { $0.idle_h < $1.idle_h }
+            : store.sessions.filter { Self.sessionMatches($0, q) }.sorted(by: Self.byPriority)
+        return Array(base.prefix(60))
+    }
+    // Level 2: the actions available on one session. Derived from that session's own
+    // state (archived/pinned/unread) so labels are always correct, mirroring the
+    // right-click menu. Filtered by the query while drilled in.
+    private func paletteActions(_ s: Session) -> [PaletteAction] {
+        var a: [PaletteAction] = [
+            .init(id: "open", title: "打开(嵌入)", icon: "arrow.forward.circle") { openEmbedded(s) },
+            .init(id: "archive", title: s.archived ? "取消归档" : "归档",
+                  icon: s.archived ? "tray.and.arrow.up" : "archivebox") { store.setArchived(s, !s.archived) },
+        ]
+        if !s.archived {
+            a.append(.init(id: "pin", title: s.pinned ? "取消置顶" : "置顶",
+                           icon: s.pinned ? "pin.slash" : "pin") { store.setPinned(s, !s.pinned) })
+            a.append(.init(id: "unread", title: s.unread ? "标记已读" : "标记未读",
+                           icon: s.unread ? "envelope.open" : "envelope.badge") { store.setUnread(s, !s.unread) })
+        }
+        a.append(.init(id: "rename", title: "重命名", icon: "pencil") { beginRename(s) })
+        a.append(.init(id: "kitty", title: "在 kitty 窗口打开", icon: "rectangle.on.rectangle") { store.open(s) })
+        return a
+    }
+    private var paletteActionResults: [PaletteAction] {
+        guard let s = paletteActionsFor else { return [] }
+        let all = paletteActions(s)
+        let q = paletteQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        return q.isEmpty ? all : all.filter { $0.title.lowercased().contains(q) }
+    }
+    private func paletteEmbedGlyph(_ s: Session) -> String {
+        if term.running.contains(s.full_sid) { return "terminal.fill" }
+        if term.exited.contains(s.full_sid) { return "terminal" }
+        return "circle.dotted"
+    }
+
+    // MARK: Cmd+K palette — control
+    private func openPalette() {
+        paletteQuery = ""; paletteSel = 0; paletteActionsFor = nil
+        showPalette = true
+        DispatchQueue.main.async { focus = .palette }
+    }
+    private func closePalette() {
+        showPalette = false; paletteActionsFor = nil
+        focus = .list
+    }
+    // Esc: back out of the action level first, only then dismiss the whole palette.
+    private func paletteEscape() {
+        if paletteActionsFor != nil { paletteActionsFor = nil; paletteQuery = ""; paletteSel = 0 }
+        else { closePalette() }
+    }
+    private func paletteMove(_ d: Int) {
+        let n = paletteActionsFor != nil ? paletteActionResults.count : paletteSessions.count
+        guard n > 0 else { return }
+        paletteSel = min(max(paletteSel + d, 0), n - 1)
+    }
+    // Tab: drill from the highlighted session into its action list.
+    private func paletteDrill() {
+        guard paletteActionsFor == nil else { return }
+        let ss = paletteSessions
+        guard paletteSel < ss.count else { return }
+        paletteActionsFor = ss[paletteSel]; paletteQuery = ""; paletteSel = 0
+    }
+    // Enter: run the highlighted action, or open the highlighted session. Close the
+    // palette BEFORE running so a follow-up sheet (rename) isn't hidden behind it.
+    private func paletteCommit() {
+        if paletteActionsFor != nil {
+            let acts = paletteActionResults
+            guard paletteSel < acts.count else { return }
+            let act = acts[paletteSel]
+            closePalette(); act.run()
+        } else {
+            let ss = paletteSessions
+            guard paletteSel < ss.count else { return }
+            let s = ss[paletteSel]
+            closePalette(); openEmbedded(s)
+        }
     }
 
     enum Mode: String, CaseIterable, Identifiable {
-        case active = "会话", live = "活跃", stale = "陈旧", archived = "已归档"
+        // Order = left-to-right tab order = Cmd+1..4. 活跃 is first (the default).
+        case live = "活跃", active = "会话", stale = "陈旧", archived = "已归档"
         var id: Self { self }
     }
 
@@ -1026,8 +1133,15 @@ struct ContentView: View {
         }
         .ignoresSafeArea()                          // let both panes fill under the transparent titlebar
         .overlay { openPathPanel }
+        .overlay { commandPalette }
         .frame(minWidth: 820, minHeight: 480)
-        .onAppear { store.start(); Activity.shared.start(); focus = .list; updateQuakeCwd() }
+        .onAppear {
+            store.start(); Activity.shared.start(); focus = .list; updateQuakeCwd()
+            // Give Activity a way to name a session for its completion banners.
+            Activity.shared.displayName = { sid in
+                store.sessions.first(where: { $0.full_sid == sid })?.name ?? "Claude 会话"
+            }
+        }
         .onChange(of: activeSID) { _, id in
             updateQuakeCwd(); Activity.shared.markFocused(id)
             hoveredID = nil   // switch kills any stale hover on the previous row
@@ -1052,9 +1166,20 @@ struct ContentView: View {
                 store.flash("没有打开的会话终端")
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .leaderFocusSearch)) { _ in
-            focus = .search
+        .onReceive(NotificationCenter.default.publisher(for: .leaderSelectTab)) { note in
+            if let i = note.object as? Int, Mode.allCases.indices.contains(i) {
+                withAnimation(.easeInOut(duration: 0.12)) { mode = Mode.allCases[i] }
+            }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .leaderTogglePalette)) { _ in
+            if showPalette { closePalette() } else { openPalette() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .leaderOpenSession)) { note in
+            // A completion banner was clicked — embed that session in the main pane.
+            if let sid = note.object as? String,
+               let s = store.sessions.first(where: { $0.full_sid == sid }) { openEmbedded(s) }
+        }
+        .onChange(of: paletteQuery) { _, _ in paletteSel = 0 }
         .confirmationDialog("关闭会话终端?", isPresented: $confirmCloseActive, titleVisibility: .visible) {
             Button("关闭会话", role: .destructive) { if let t = closeTarget { closeSession(t.sid) } }
             Button("取消", role: .cancel) {}
@@ -1088,7 +1213,6 @@ struct ContentView: View {
     private var sidebar: some View {
         VStack(spacing: 0) {
             trafficInset                                 // 红绿灯落在这块留白里
-            searchBar
             Picker("视图", selection: $mode) {
                 ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
             }
@@ -1173,6 +1297,118 @@ struct ContentView: View {
                 }
             }
             .transition(.opacity)
+        }
+    }
+
+    // MARK: Cmd+K palette overlay — session search that drills into per-session
+    // actions. Same floating-panel look as the Cmd+Shift+O quick-open above.
+    @ViewBuilder private var commandPalette: some View {
+        if showPalette {
+            ZStack(alignment: .top) {
+                Color.black.opacity(0.28).ignoresSafeArea()
+                    .onTapGesture { closePalette() }
+                VStack(spacing: 0) {
+                    HStack(spacing: 10) {
+                        // Doubles as a back button once drilled into an action list.
+                        Image(systemName: paletteActionsFor == nil ? "magnifyingglass" : "chevron.left")
+                            .foregroundStyle(.secondary)
+                            .contentShape(Rectangle())
+                            .onTapGesture { if paletteActionsFor != nil { paletteEscape() } }
+                        TextField(paletteActionsFor == nil
+                                    ? "搜索会话(名称 / 目录 / 分支 / session id)"
+                                    : "在「\(paletteActionsFor?.name ?? "")」中执行…",
+                                  text: $paletteQuery)
+                            .textFieldStyle(.plain).font(.title3)
+                            .focused($focus, equals: .palette)
+                            .onSubmit { paletteCommit() }
+                            .onKeyPress(.downArrow) { paletteMove(1); return .handled }
+                            .onKeyPress(.upArrow) { paletteMove(-1); return .handled }
+                            .onKeyPress(.tab) { paletteDrill(); return .handled }
+                    }
+                    .padding(14)
+                    Divider()
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                if paletteActionsFor == nil { paletteSessionList }
+                                else { paletteActionList }
+                            }
+                        }
+                        .frame(maxHeight: 360)
+                        .onChange(of: paletteSel) { _, i in
+                            withAnimation(.easeInOut(duration: 0.1)) { proxy.scrollTo(i, anchor: .center) }
+                        }
+                    }
+                }
+                .frame(width: 560)
+                .background(RoundedRectangle(cornerRadius: 14).fill(.regularMaterial))
+                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.08)))
+                .shadow(radius: 30, y: 12)
+                .padding(.top, 96)
+                // Esc: back out of the action list, else dismiss (hidden button so it
+                // fires while the text field holds focus — same trick as quick-open).
+                .background {
+                    Button("") { paletteEscape() }.keyboardShortcut(.cancelAction).opacity(0)
+                }
+            }
+            .transition(.opacity)
+        }
+    }
+
+    @ViewBuilder private var paletteSessionList: some View {
+        let sessions = paletteSessions
+        if sessions.isEmpty {
+            Text(paletteQuery.isEmpty ? "没有会话" : "无匹配会话")
+                .foregroundStyle(.secondary).font(.callout)
+                .frame(maxWidth: .infinity).padding(.vertical, 28)
+        } else {
+            ForEach(Array(sessions.enumerated()), id: \.element.id) { i, s in
+                let sel = i == paletteSel
+                HStack(spacing: 10) {
+                    Image(systemName: paletteEmbedGlyph(s)).font(.caption)
+                        .foregroundStyle(.secondary).frame(width: 16)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(s.name).lineLimit(1)
+                        Text("\(s.ago)前 · \(s.repo)").font(.caption)
+                            .foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    if sel {   // keyboard hint: Tab drills into this session's actions
+                        HStack(spacing: 3) {
+                            Text("⇥").font(.callout); Text("操作").font(.caption2)
+                        }.foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(sel ? Color.primary.opacity(0.12) : .clear)
+                .contentShape(Rectangle())
+                .onTapGesture { closePalette(); openEmbedded(s) }
+                .id(i)
+            }
+        }
+    }
+
+    @ViewBuilder private var paletteActionList: some View {
+        let acts = paletteActionResults
+        if acts.isEmpty {
+            Text("无匹配操作")
+                .foregroundStyle(.secondary).font(.callout)
+                .frame(maxWidth: .infinity).padding(.vertical, 28)
+        } else {
+            ForEach(Array(acts.enumerated()), id: \.element.id) { i, act in
+                let sel = i == paletteSel
+                HStack(spacing: 10) {
+                    Image(systemName: act.icon).font(.callout)
+                        .foregroundStyle(.secondary).frame(width: 16)
+                    Text(act.title).lineLimit(1)
+                    Spacer(minLength: 8)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 9)
+                .background(sel ? Color.primary.opacity(0.12) : .clear)
+                .contentShape(Rectangle())
+                .onTapGesture { closePalette(); act.run() }
+                .id(i)
+            }
         }
     }
 
@@ -1287,23 +1523,6 @@ struct ContentView: View {
             .buttonStyle(.plain).foregroundStyle(color).help(help)
     }
 
-    private var searchBar: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.secondary)
-            TextField("搜索 标题 / 文件夹 / session id", text: $query)
-                .textFieldStyle(.plain).font(.callout)
-                .focused($focus, equals: .search)
-                .onSubmit { selectedID = navList.first?.id; openSelected(); focus = .list }
-            if !query.isEmpty {
-                Button { query = "" } label: { Image(systemName: "xmark.circle.fill") }
-                    .buttonStyle(.plain).foregroundStyle(.tertiary)
-            }
-        }
-        .padding(.horizontal, 8).padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 7).fill(.quaternary))
-        .padding(.horizontal, DS.rowPadH).padding(.bottom, 7)
-    }
-
     private var list: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -1344,37 +1563,26 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var activeContent: some View {
-        if !query.isEmpty {                                   // 搜索:跨分区扁平结果
-            let results = store.sessions.filter { !$0.archived && matches($0) }
-                .sorted(by: Self.byPriority)
-            if results.isEmpty {
-                ContentUnavailableView("无匹配会话", systemImage: "magnifyingglass").padding(.top, 40)
-            } else {
-                SectionHeader(title: "搜索结果", n: results.count, icon: "magnifyingglass")
-                ForEach(results) { s in sessionRow(s) }
-            }
-        } else {
-            if !pinnedList.isEmpty {
-                // The one golden star lives here; rows stay clean (pin/unpin via 右键).
-                SectionHeader(title: "置顶", n: pinnedList.count, icon: "star.fill", iconTint: .yellow)
-                ForEach(pinnedList) { s in sessionRow(s) }
-            }
-            if grouped {
-                ForEach(folders, id: \.name) { folder in
-                    let isCollapsed = collapsed.contains(folder.name)
-                    FolderHeader(title: folder.name, n: folder.items.count, collapsed: isCollapsed) {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            if isCollapsed { collapsed.remove(folder.name) } else { collapsed.insert(folder.name) }
-                        }
-                    }
-                    if !isCollapsed {
-                        ForEach(folder.items) { s in sessionRow(s) }
+        if !pinnedList.isEmpty {
+            // The one golden star lives here; rows stay clean (pin/unpin via 右键).
+            SectionHeader(title: "置顶", n: pinnedList.count, icon: "star.fill", iconTint: .yellow)
+            ForEach(pinnedList) { s in sessionRow(s) }
+        }
+        if grouped {
+            ForEach(folders, id: \.name) { folder in
+                let isCollapsed = collapsed.contains(folder.name)
+                FolderHeader(title: folder.name, n: folder.items.count, collapsed: isCollapsed) {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        if isCollapsed { collapsed.remove(folder.name) } else { collapsed.insert(folder.name) }
                     }
                 }
-            } else {
-                SectionHeader(title: "最近使用", n: flatList.count, icon: "clock")
-                ForEach(flatList) { s in sessionRow(s) }
+                if !isCollapsed {
+                    ForEach(folder.items) { s in sessionRow(s) }
+                }
             }
+        } else {
+            SectionHeader(title: "最近使用", n: flatList.count, icon: "clock")
+            ForEach(flatList) { s in sessionRow(s) }
         }
     }
 
@@ -1387,29 +1595,25 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var liveContent: some View {
-        let items = liveList.filter(matches)
+        let items = liveList
         if items.isEmpty {
-            ContentUnavailableView(query.isEmpty ? "没有活跃会话" : "无匹配会话",
+            ContentUnavailableView("没有活跃会话",
                 systemImage: "terminal",
-                description: Text(query.isEmpty ? "开着终端的会话(App 内嵌入运行,或外部 kitty/终端里的 claude)会出现在这里" : ""))
+                description: Text("开着终端的会话(App 内嵌入运行,或外部 kitty/终端里的 claude)会出现在这里"))
                 .padding(.top, 40)
         } else {
-            SectionHeader(title: query.isEmpty ? "活跃" : "搜索结果", n: items.count,
-                          icon: query.isEmpty ? "terminal" : "magnifyingglass")
+            SectionHeader(title: "活跃", n: items.count, icon: "terminal")
             ForEach(items) { s in sessionRow(s) }
         }
     }
 
     @ViewBuilder private var staleContent: some View {
-        let items = staleList.filter(matches).sorted { $0.idle_h < $1.idle_h }
+        let items = staleList.sorted { $0.idle_h < $1.idle_h }
         if items.isEmpty {
-            ContentUnavailableView(query.isEmpty ? "没有陈旧会话" : "无匹配会话",
+            ContentUnavailableView("没有陈旧会话",
                 systemImage: "clock.badge.xmark",
-                description: Text(query.isEmpty ? "最后消息满 15 天的会话会自动归到这里" : ""))
+                description: Text("最后消息满 15 天的会话会自动归到这里"))
                 .padding(.top, 40)
-        } else if !query.isEmpty {
-            SectionHeader(title: "搜索结果", n: items.count, icon: "magnifyingglass")
-            ForEach(items) { s in sessionRow(s) }
         } else {
             FolderHeader(title: "陈旧会话(15天+)", n: items.count,
                          collapsed: !staleExpanded, icon: "clock.badge.xmark") {
@@ -1422,11 +1626,11 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var archivedContent: some View {
-        let items = archivedList.filter(matches).sorted(by: Self.byPriority)
+        let items = archivedList.sorted(by: Self.byPriority)
         if items.isEmpty {
-            ContentUnavailableView(query.isEmpty ? "没有已归档的会话" : "无匹配会话",
+            ContentUnavailableView("没有已归档的会话",
                 systemImage: "archivebox",
-                description: Text(query.isEmpty ? "在“会话”里点卡片右侧的归档图标即可归档" : ""))
+                description: Text("在“会话”里点卡片右侧的归档图标即可归档"))
                 .padding(.top, 40)
         } else {
             ForEach(items) { s in

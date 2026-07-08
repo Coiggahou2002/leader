@@ -29,7 +29,14 @@ echo "→ (re)generate signed appcast"
 GA="$(find "$ROOT/.build/artifacts" -type f -name generate_appcast 2>/dev/null | head -1)"
 [ -z "$GA" ] && { echo "✗ generate_appcast not found — run ./build.sh first"; exit 1; }
 # Enclosure URLs resolve to whatever the *latest* release attaches, matching SUFeedURL.
-"$GA" --download-url-prefix "https://github.com/$REPO/releases/latest/download/" "$REL"
+PREFIX="https://github.com/$REPO/releases/latest/download/"
+if [ -n "$SPARKLE_ED_PRIVATE_KEY" ]; then
+  # CI: key comes from a secret via stdin (never written to disk).
+  printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | "$GA" --ed-key-file - --download-url-prefix "$PREFIX" "$REL"
+else
+  # Local: key is read from the login keychain.
+  "$GA" --download-url-prefix "$PREFIX" "$REL"
+fi
 
 echo "→ publish GitHub release $TAG"
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then

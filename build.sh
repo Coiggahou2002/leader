@@ -19,7 +19,7 @@ iconutil -c icns "$ASSET/Leader.iconset" -o "$ASSET/AppIcon.icns"
 echo "→ compile (swift build -c release)"
 swift build -c release
 BIN="$(swift build -c release --show-bin-path)"
-VERSION="$(cat "$ROOT/VERSION" 2>/dev/null || echo 1.0)"   # bump ./VERSION each release
+VERSION="${LEADER_VERSION:-$(cat "$ROOT/VERSION" 2>/dev/null || echo 1.0)}"   # env (CI tag) wins, else ./VERSION
 FEED_URL="https://github.com/Coiggahou2002/leader/releases/latest/download/appcast.xml"
 # Sparkle EdDSA public key (private half lives in the keychain; see release.sh).
 PUBKEY="m+Oe9QUg09PX7rXOJnc2IEbc/TkXbftv6HN5NmT3w3k="

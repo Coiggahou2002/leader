@@ -1,0 +1,44 @@
+name: Release
+
+# Cut a release from CI. Two ways to trigger:
+#   • push a tag:      git tag v1.2 && git push origin v1.2   (tag == version)
+#   • manually:        Actions → Release → Run workflow → enter a version
+#
+# Requires one repository secret, SPARKLE_ED_PRIVATE_KEY — the base64 EdDSA key
+# exported from your keychain (generate_keys -x). The built-in GITHUB_TOKEN
+# publishes the release (permissions.contents: write); no Apple account needed
+# since the app is ad-hoc-signed and updates are trusted via the EdDSA signature.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 1.2 (no leading v)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14        # Apple Silicon → arm64 build, matching local releases
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#v}"          # strip leading v from the tag
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Build, sign appcast, publish release
+        env:
+          LEADER_VERSION: ${{ steps.v.outputs.version }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: ./release.sh

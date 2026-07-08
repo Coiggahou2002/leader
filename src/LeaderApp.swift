@@ -4,6 +4,7 @@
 import SwiftUI
 import AppKit
 import Observation
+import UserNotifications
 
 // MARK: - Shared design constants
 enum DS {
@@ -273,6 +274,7 @@ final class Activity: ObservableObject {
     @Published private(set) var attention: Set<String> = []   // full_sids needing a pulse (done while unfocused)
     @Published private(set) var running: Set<String> = []      // full_sids reasoning NOW (UserPromptSubmit..Stop)
     var focusedSID: String?                                    // the embedded session
+    var displayName: (String) -> String = { _ in "Claude 会话" } // full_sid -> name (set by the UI)
 
     private var appActive = true
     private var source: DispatchSourceFileSystemObject?
@@ -335,7 +337,7 @@ final class Activity: ObservableObject {
             case "Stop":
                 running.remove(sid)                          // reasoning finished
                 if sid == focusedSID && appActive { attention.remove(sid) }   // you're watching it
-                else { attention.insert(sid) }
+                else { attention.insert(sid); postDoneNotification(sid) }     // done while away -> pulse + banner
             case "UserPromptSubmit":
                 running.insert(sid)                          // reasoning started -> spinner
                 attention.remove(sid)                        // work resumed -> clear stale pulse
@@ -344,6 +346,20 @@ final class Activity: ObservableObject {
             default: break
             }
         }
+    }
+
+    // macOS banner for a turn that finished while you weren't watching it. Stable
+    // per-session identifier so a chatty session replaces its banner, not stacks.
+    // Guarded by Conf.notify; add() is a no-op if the user denied authorization.
+    private func postDoneNotification(_ sid: String) {
+        guard Conf.notify else { return }
+        let content = UNMutableNotificationContent()
+        content.title = displayName(sid)
+        content.body = "已完成本轮回答"
+        content.sound = .default
+        content.userInfo = ["sid": sid]
+        let req = UNNotificationRequest(identifier: "leader.done." + sid, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
     }
 
     private func readAll() -> [(String, Double, String)] {
@@ -625,7 +641,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationDidFinishLaunching(_ n: Notification) {
         installScrollMonitor()                       // wheel -> embedded terminal
         QuakeTerminal.shared.installHotkey()          // double-tap Control -> scratch terminal
-        installKeyMonitor()                           // Cmd+W -> close active session; Cmd+F -> focus search
+        installKeyMonitor()                           // Cmd+W close · Cmd+K/F palette · Cmd+1..4 tabs
+        UNUserNotificationCenter.current().delegate = self
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        // configure() only styles the titlebar (transparent + full-size content). It
+        // must NOT touch the window frame — SwiftUI's WindowGroup persists and restores
+        // size/position across launches on its own; resetting it here caused the
+        // "restored correctly, then snapped back to centered" flicker.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.configure() }
         NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
@@ -705,6 +727,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         a.addButton(withTitle: "取消")
         a.alertStyle = .warning
         return a.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+
+    // Show banners even when Leader is frontmost — you may be watching one session's
+    // terminal while another finishes.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+    // Click a banner -> focus Leader and open that session.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        if let sid = response.notification.request.content.userInfo["sid"] as? String {
+            NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .leaderOpenSession, object: sid)
+        }
+        completionHandler()
     }
 }
 
@@ -1690,6 +1730,7 @@ struct SettingsSheet: View {
     @State private var fontSize: CGFloat
     @State private var lineHeight: CGFloat
     @State private var softColors: Bool
+    @State private var notify: Bool
     init() {
         let p = Conf.proxy
         _enabled = State(initialValue: !p.isEmpty)
@@ -1698,6 +1739,7 @@ struct SettingsSheet: View {
         _fontSize = State(initialValue: Conf.termFontSize)
         _lineHeight = State(initialValue: Conf.lineHeight)
         _softColors = State(initialValue: Conf.softColors)
+        _notify = State(initialValue: Conf.notify)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1741,6 +1783,16 @@ struct SettingsSheet: View {
 
             Divider()
 
+            // MARK: notifications
+            VStack(alignment: .leading, spacing: 8) {
+                Text("通知").font(.subheadline).bold()
+                Toggle("会话完成时发送系统通知", isOn: $notify)
+                Text("当某个会话在你未查看它时完成一轮回答,发送 macOS 系统通知(点击通知直接跳到该会话)。首次开启会弹系统授权;若之前拒绝过,需去「系统设置 → 通知 → Leader」手动允许。")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
             // MARK: proxy
             VStack(alignment: .leading, spacing: 8) {
                 Text("代理").font(.subheadline).bold()
@@ -1770,7 +1822,12 @@ struct SettingsSheet: View {
                                "term_font": font,
                                "term_font_size": Double(fontSize),
                                "line_height": Double(lineHeight),
-                               "soft_colors": softColors])
+                               "soft_colors": softColors,
+                               "notify": notify])
+                    // If notifications were just enabled, (re)request authorization now.
+                    if notify {
+                        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+                    }
                     TerminalManager.shared.reapplyTheme()   // live terminals update now
                     QuakeTerminal.shared.reapplyTheme()
                     dismiss()

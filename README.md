@@ -156,8 +156,6 @@ Leader.app (SwiftUI)
   (no conversation loss). Planned fix: identify windows at click time via
   `kitty @ ls` cmdline matching — deterministic and race-free.
 - UI localization (English) is not done yet.
-- `server.py` is an optional browser version of the same board — functional but
-  unpolished.
 
 ## Contributing
 

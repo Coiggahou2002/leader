@@ -175,7 +175,7 @@ final class Store {
     func start() {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor [weak self] in self?.refresh() }
         }
     }
     func refresh() {
@@ -296,13 +296,13 @@ final class Activity: ObservableObject {
         appActive = NSApp.isActive
         let nc = NotificationCenter.default
         nc.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) {
-            [weak self] _ in Task { @MainActor in self?.appBecameActive() }
+            [weak self] _ in Task { @MainActor [weak self] in self?.appBecameActive() }
         }
         nc.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) {
-            [weak self] _ in Task { @MainActor in self?.appActive = false }
+            [weak self] _ in Task { @MainActor [weak self] in self?.appActive = false }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.process() }
+            Task { @MainActor [weak self] in self?.process() }
         }
     }
 
@@ -324,7 +324,7 @@ final class Activity: ObservableObject {
         // directory vnode reports as .write — so dir-level watching catches it.
         let s = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd,
                                                           eventMask: [.write], queue: .main)
-        s.setEventHandler { [weak self] in Task { @MainActor in self?.process() } }
+        s.setEventHandler { [weak self] in Task { @MainActor [weak self] in self?.process() } }
         s.setCancelHandler { [fd] in close(fd) }
         s.resume()
         source = s

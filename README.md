@@ -102,6 +102,23 @@ open ~/Applications/Leader.app
 The Python backend is bundled **inside** the app bundle, so the installed app
 has no dependency on the source tree.
 
+### Updating
+
+Leader updates itself via [Sparkle](https://sparkle-project.org): it checks an
+appcast on GitHub Releases and installs new versions in place — click
+**检查更新** (bottom bar) or wait for the scheduled check. Updates are verified
+by an EdDSA signature, and Sparkle clears the download quarantine so they
+relaunch without a Gatekeeper prompt.
+
+> First launch of a fresh download still needs a one-time Gatekeeper bypass
+> (right-click → **Open**, or `xattr -dr com.apple.quarantine Leader.app`) — the
+> app is ad-hoc-signed, not notarized. Every subsequent auto-update is clean.
+
+**Releasing (maintainers):** bump [`VERSION`](VERSION), then `./release.sh` —
+it builds, zips, regenerates the EdDSA-signed appcast (signing key lives in your
+login keychain), and publishes a GitHub Release. `SUFeedURL` points at the
+`latest` release asset, so a running app sees the update automatically.
+
 ## Configuration
 
 Everything has a sane default; override any key in `~/.config/leader/config.json`

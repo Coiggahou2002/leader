@@ -5,6 +5,7 @@ import SwiftUI
 import AppKit
 import Observation
 import UserNotifications
+import Sparkle
 
 // MARK: - Shared design constants
 enum DS {
@@ -616,12 +617,20 @@ extension Notification.Name {
     static let leaderTogglePalette = Notification.Name("leaderTogglePalette")
     static let leaderSelectTab = Notification.Name("leaderSelectTab")   // object: Int tab index
     static let leaderOpenSession = Notification.Name("leaderOpenSession")   // object: String full_sid
+    static let leaderCheckUpdates = Notification.Name("leaderCheckUpdates")   // manual "检查更新" from the UI
 }
 
 // MARK: - 窗口配置 + 置顶
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     static var pinned = false   // window stays normal level; opt-in via the pin toolbar button
     var window: NSWindow?
+
+    // Sparkle in-app auto-update. startingUpdater:true kicks off the scheduled
+    // background check (interval + feed URL come from Info.plist: SUFeedURL,
+    // SUEnableAutomaticChecks, SUPublicEDKey). The "检查更新…" button posts
+    // .leaderCheckUpdates, which we forward to checkForUpdates(_:).
+    private lazy var updater = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
     // Single-instance guard. Finder double-click already de-dups a .app by bundle
     // id, but launching the raw binary (or two mismatched bundles) does not — so if
@@ -652,6 +661,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.applyLevel() }
+        _ = updater                                   // touch the lazy prop to start the updater now
+        NotificationCenter.default.addObserver(
+            forName: .leaderCheckUpdates, object: nil, queue: .main
+        ) { [weak self] _ in self?.updater.checkForUpdates(nil) }
     }
     // Cmd+W must not close the window/quit the app; repurpose it to "close the
     // active session" (with confirm, handled in ContentView). Swallow the event
@@ -1599,6 +1612,9 @@ struct ContentView: View {
                        grouped ? "按文件夹分组(点切最近使用)" : "按最近使用(点切分组)",
                        grouped ? Color.accentColor : Color.secondary) { grouped.toggle() }
             iconButton("questionmark.circle", "快捷键帮助", Color.secondary) { showHelp = true }
+            iconButton("arrow.down.circle", "检查更新", Color.secondary) {
+                NotificationCenter.default.post(name: .leaderCheckUpdates, object: nil)
+            }
             iconButton("gearshape", "设置(代理等)", Color.secondary) { showSettings = true }
             iconButton(pinned ? "pin.fill" : "pin", "窗口置顶",
                        pinned ? Color.accentColor : Color.secondary, action: togglePin)

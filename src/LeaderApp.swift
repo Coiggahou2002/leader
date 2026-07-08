@@ -12,7 +12,7 @@ enum DS {
     static let rowPadH: CGFloat = 10
     static let corner: CGFloat = 9
     static let panelWidth: CGFloat = 320
-    static let archiveZone: CGFloat = 30   // trailing hit-zone: archive
+    static let menuZone: CGFloat = 34      // trailing hit-zone: opens the ••• menu
 }
 
 // Flat, opaque sidebar fill (Codex-style). Solid so it reads uniform all the way
@@ -514,32 +514,39 @@ final class MouseNSView: NSView {
     var isUnread = false
     var canUnread = true
     var archiveTitle = "归档"
+    var archiveSymbol = "archivebox"
     var onHover: (Bool) -> Void = { _ in }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    // Left-click opens the session; a click in the trailing zone (under the •••
+    // glyph) opens the same menu as a right-click. Folder headers pass
+    // contextMenuEnabled=false, so their whole width just fires onClick (toggle) —
+    // no dead strip on the right.
     override func mouseDown(with event: NSEvent) {
-        let x = convert(event.locationInWindow, from: nil).x
-        if x > bounds.width - DS.archiveZone { onArchive() }
+        let p = convert(event.locationInWindow, from: nil)
+        if contextMenuEnabled, p.x > bounds.width - DS.menuZone { showMenu(at: p) }
         else { onClick() }
     }
-    // Right-click -> a proper context menu (previously this was a bare rename).
     override func rightMouseDown(with event: NSEvent) {
         guard contextMenuEnabled else { return }
+        showMenu(at: convert(event.locationInWindow, from: nil))
+    }
+    // The row's ••• / right-click menu. Labels/icons derive from the session's own
+    // state so they're always correct (置顶↔取消置顶, 归档↔取消归档).
+    private func showMenu(at point: NSPoint) {
         let menu = NSMenu()
-        if canUnread {
-            let u = NSMenuItem(title: isUnread ? "标记已读" : "标记未读",
-                               action: #selector(miUnread), keyEquivalent: "")
-            u.target = self; menu.addItem(u); menu.addItem(.separator())
+        func add(_ title: String, _ symbol: String, _ sel: Selector) {
+            let it = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+            it.target = self
+            it.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            menu.addItem(it)
         }
-        let r = NSMenuItem(title: "重命名", action: #selector(miRename), keyEquivalent: "")
-        r.target = self; menu.addItem(r)
-        if canPin {
-            let p = NSMenuItem(title: isPinned ? "取消置顶" : "置顶",
-                               action: #selector(miPin), keyEquivalent: "")
-            p.target = self; menu.addItem(p)
-        }
-        let a = NSMenuItem(title: archiveTitle, action: #selector(miArchive), keyEquivalent: "")
-        a.target = self; menu.addItem(a)
-        menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)
+        if canPin { add(isPinned ? "取消置顶" : "置顶", isPinned ? "star.slash" : "star", #selector(miPin)) }
+        if canUnread { add(isUnread ? "标记已读" : "标记未读",
+                           isUnread ? "envelope.open" : "envelope.badge", #selector(miUnread)) }
+        add("重命名", "pencil", #selector(miRename))
+        menu.addItem(.separator())
+        add(archiveTitle, archiveSymbol, #selector(miArchive))
+        menu.popUp(positioning: nil, at: point, in: self)
     }
     @objc private func miRename() { onRename() }
     @objc private func miPin() { onPin() }
@@ -575,13 +582,14 @@ struct MouseLayer: NSViewRepresentable {
     var isUnread = false
     var canUnread = true
     var archiveTitle = "归档"
+    var archiveSymbol = "archivebox"
     var onHover: (Bool) -> Void = { _ in }
     private func apply(_ v: MouseNSView) {
         v.onClick = onClick; v.onArchive = onArchive; v.onPin = onPin
         v.onRename = onRename; v.onMarkUnread = onMarkUnread
         v.canPin = canPin; v.contextMenuEnabled = contextMenuEnabled
         v.isPinned = isPinned; v.isUnread = isUnread; v.canUnread = canUnread
-        v.archiveTitle = archiveTitle; v.onHover = onHover
+        v.archiveTitle = archiveTitle; v.archiveSymbol = archiveSymbol; v.onHover = onHover
     }
     func makeNSView(context: Context) -> MouseNSView { let v = MouseNSView(); apply(v); return v }
     func updateNSView(_ v: MouseNSView, context: Context) { apply(v) }
@@ -721,37 +729,27 @@ struct Row: View {
     private var canPinOrUnread: Bool { !s.archived }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: DS.gap + 3) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
-                    Text(s.name).font(.callout).bold().lineLimit(1)
-                        .workingShimmer(isWorking)
-                    if s.unread { UnreadBadge() }
-                    if let sym = embedSymbol {
-                        Image(systemName: sym).font(.caption2).foregroundStyle(.secondary)
-                            .help(sym == "terminal.fill" ? "已嵌入运行" : "已嵌入(进程已退出)")
-                    }
-                    if activity.attention.contains(s.full_sid) { BreathingDot() }
-                }
-                Text("\(s.ago)前 · \(s.repo)")
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        HStack(spacing: 6) {
+            Text(s.name).font(.system(size: 14)).lineLimit(1)
+                .workingShimmer(isWorking)
+            if s.unread { UnreadBadge() }
+            if let sym = embedSymbol {
+                Image(systemName: sym).font(.caption2).foregroundStyle(.secondary)
+                    .help(sym == "terminal.fill" ? "已嵌入运行" : "已嵌入(进程已退出)")
             }
-            Spacer(minLength: 0)
-            // Archive is a deliberate action: keep it out of sight until the row is
-            // hovered. The trailing hit-zone still works — clicking requires the
-            // pointer to be on the row, which is exactly when the icon is visible.
-            // Un-archive is tinted: at caption size the two glyphs look alike, and
-            // a grey box on a just-unarchived row reads as "nothing changed".
-            Image(systemName: archiveSymbol)
-                .foregroundStyle(s.archived ? AnyShapeStyle(Color.accentColor)
-                                            : AnyShapeStyle(.secondary))
+            if activity.attention.contains(s.full_sid) { BreathingDot() }
+            Spacer(minLength: 4)
+            // ••• more-actions, hidden until the row is hovered/selected. The actual
+            // click is caught by MouseLayer's trailing zone (acceptsFirstMouse), which
+            // pops the same menu as a right-click — this glyph is just its marker.
+            Image(systemName: "ellipsis")
+                .font(.callout).foregroundStyle(.secondary)
                 .frame(width: 18)
-                .font(.caption)
-                .opacity(hover ? 1 : 0)
-                .help(archiveTitle)
+                .opacity(hover || selected ? 1 : 0)
+                .help("更多操作")
         }
         .padding(.vertical, DS.rowPadV).padding(.horizontal, DS.rowPadH)
-        .frame(minHeight: 36)
+        .frame(minHeight: 30)
         .background(RoundedRectangle(cornerRadius: DS.corner)
             .fill(selected ? AnyShapeStyle(Color.primary.opacity(0.14))
                            : (hover ? AnyShapeStyle(Color.primary.opacity(0.06)) : AnyShapeStyle(.clear))))
@@ -759,7 +757,8 @@ struct Row: View {
         .overlay { MouseLayer(onClick: onOpen, onArchive: onArchive, onPin: onPin,
                               onRename: onRename, onMarkUnread: onMarkUnread,
                               canPin: canPinOrUnread, isPinned: s.pinned, isUnread: s.unread,
-                              canUnread: canPinOrUnread, archiveTitle: archiveTitle, onHover: { inside in
+                              canUnread: canPinOrUnread, archiveTitle: archiveTitle,
+                              archiveSymbol: archiveSymbol, onHover: { inside in
             if inside { hoveredID = s.id } else if hoveredID == s.id { hoveredID = nil }
         }) }
         .accessibilityElement(children: .combine)

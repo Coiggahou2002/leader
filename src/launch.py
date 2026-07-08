@@ -7,7 +7,7 @@ which Kaku/Ghostty/iTerm could not do reliably:
   - reuse: `kitty @ focus-window --match id:<id>` -> focuses that exact window,
            even when many windows share the same cwd.
 
-Single source of truth, used by the native app (CLI) and server.py (import).
+Single source of truth for the native app (also runnable as a CLI).
 CLI:  python3 launch.py <sid> [cwd]   ->  prints JSON {ok, reused, win}
 """
 import json, os, subprocess, sys, time

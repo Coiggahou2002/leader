@@ -224,7 +224,7 @@ def digest(path: str) -> dict:
 # we tried (answered-and-asking, unpushed commits, bad-state tails) fired far
 # too often, so the tier and its yellow row hints were removed. Attention now
 # comes from the live hook signals in the app (shimmer / breathing dot /
-# unread), not transcript archaeology. `why` remains for the CLI/server views.
+# unread), not transcript archaeology. `why` remains for the CLI view.
 def classify(d: dict) -> tuple[str, list[str]]:
     c = CONFIG
     idle_d = d["idle_h"] / 24
@@ -246,7 +246,7 @@ def classify(d: dict) -> tuple[str, list[str]]:
         return "b", ["近期活跃、无阻塞信号"]
     return "b", [f"{idle_d:.0f}d 没动(临界)"]
 
-# ---- collect (shared by CLI + GUI server) ----------------------------------
+# ---- collect (shared by CLI + app) -----------------------------------------
 def _flag_set(name: str) -> set:
     try:
         return set(json.load(open(config.data_file(f"{name}.json"))).get("sids", []))

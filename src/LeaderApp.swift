@@ -934,7 +934,12 @@ struct ContentView: View {
     private func openEmbedded(_ s: Session) {
         selectedID = s.id
         activeSID = s.id
-        if s.unread { store.setUnread(s, false) }   // 打开即已读(邮件式)
+        if s.unread { store.setUnread(s, false) }        // 打开即已读(邮件式)
+        // Embedding = active work again, so an archived session must come back out of
+        // 已归档 — otherwise it runs a terminal but never shows in 活跃 (which, like every
+        // non-archive list, filters !archived). Covers Cmd+K, the 已归档 row, and
+        // notification-triggered opens, since all of them route through here.
+        if s.archived { store.setArchived(s, false) }
     }
     // "+": start a fresh session embedded right here. We mint the sid so there's no
     // race to discover it; claude --session-id starts the conversation at that id.

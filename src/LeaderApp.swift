@@ -1231,8 +1231,18 @@ struct ContentView: View {
         // Unmount the terminal view FIRST (activeSID=nil → terminalArea shows the
         // empty state, TerminalContainer leaves the tree), so nothing can re-run
         // its updateNSView and re-spawn the terminal we're about to kill.
-        if activeSID == sid { activeSID = nil }
-        if pendingNew?.sid == sid { pendingNew = nil }
+        //
+        // Do the swap with animations DISABLED: Cmd+W runs this from inside the
+        // confirmationDialog's "关闭会话" button, so the mutation would otherwise
+        // inherit the dialog's dismissal transaction and SwiftUI would animate the
+        // activeEmbed→nil branch swap — the terminal fades to transparent while the
+        // empty-state placeholder scales up. We want an instant cut to the empty state.
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            if activeSID == sid { activeSID = nil }
+            if pendingNew?.sid == sid { pendingNew = nil }
+        }
         TerminalManager.shared.close(sid)
         store.markTerminalClosed(sid)     // drop from 活跃 immediately, then reconcile
     }

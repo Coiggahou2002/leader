@@ -9,8 +9,8 @@
 ## 已完成(都已按功能拆 commit 提交)
 - **P0** `SessionState` 统一状态模型(doneAway/waiting/working/closed,只从
   Activity + alive 派生);ContentView 观察 Activity,列表随 turn 事件实时重排。
-- **P1** `byAttention` cμ 排序(状态优先 → asks → idle_h)应用到全部列表 +
-  跨 tab「需要你」strip(紧凑自定义行,不复用 Row 以免 hover 串扰)。
+- **P1** `byAttention` cμ 排序(状态优先 → asks → idle_h)应用到全部列表。
+  (「需要你」strip 曾实现,用户明确不要,已移除——commit 0b422c8;别再加回来。)
 - **错误检测** scan.py `errored`/`error_text`(最后一条对话消息是
   `isApiErrorMessage` 的 assistant 条目 = 卡死;322 个真实 transcript 验证,恢复
   262/286 靠人重发)→ 侧栏脉动黄 ⚠(压掉误导性 shimmer)+ 新卡死时 macOS 横幅
@@ -19,7 +19,7 @@
   文件原子写(pid-unique tmp + os.replace,4 写者并发 6712 读 0 撕裂)。
 
 ## 尚未做 / 待验证
-- **真机 UI 验证**:排序跳动观感、strip 重复显示观感、黄 ⚠/横幅的真实渲染——
+- **真机 UI 验证**:排序跳动观感、黄 ⚠/横幅的真实渲染——
   需要装进 `~/Applications` 并重启 app(会杀嵌入会话,由用户挑时机)。
 - **P2(下一步,最高杠杆)**:每会话增量摘要。记 `lastViewedTS`(复用清
   attention 的 hook 点),会话进入 doneAway 时用便宜模型对 delta 生成一行

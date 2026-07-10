@@ -5,7 +5,9 @@ Scans ~/.claude/projects/*/*.jsonl session transcripts + git worktrees, buckets
 every session into (b) can-wait / (c) reap, and prints the fleet as JSON on
 stdout — the app's sole data source.
 
-Pure stdlib, read-only. Tunable thresholds live in CONFIG below.
+Pure stdlib. Read-only w.r.t. transcripts; the ONE thing it writes is its own
+digest cache (~/.claude/leader/scan-cache.json, atomic replace) — without it,
+every 6s refresh re-parsed >1GB of transcripts (~3.6s of CPU, forever).
 Usage:  python3 scan.py [--repo SUBSTR] [--all]   # always prints JSON
   --repo SUBSTR : only sessions whose cwd contains SUBSTR
   --all         : include the long tail of unrelated projects
@@ -21,7 +23,6 @@ CONFIG = {
     "reap_days": 14,         # older than this                       -> (c)
     "tiny_msgs": 3,          # fewer user+assistant msgs than this   -> tiny
     "tiny_idle_days": 2,     #            ... & idle this long        -> (c)
-    "tail_bytes": 60_000,    # only json-parse the last N bytes/file (cost guard)
 }
 # does the last assistant turn actually ask the user something?
 ASK = re.compile(r"[?？]|要不要|要我|还是.{0,8}[?？]?$|请确认|你想|你要|"
@@ -127,6 +128,36 @@ def worktrees(repo: str) -> dict:
             wt["dirty"], wt["ahead"] = None, None
     return out
 
+# ---- digest cache -----------------------------------------------------------
+# The content-derived fields of a digest only change when the transcript file
+# does, so they're cached per file keyed on (mtime_ns, size); only idle_h is
+# recomputed each run (from the cached last-message timestamp). Without this,
+# every 6s refresh re-read ALL transcripts (>1GB) for ~3.6s of CPU; with it, a
+# warm scan only parses the files that actually changed. A missing/corrupt/
+# version-mismatched cache just means one full re-parse. mtime pollution by
+# backfill indexers only ever causes an extra re-parse, never a stale digest.
+CACHE_PATH = config.data_file("scan-cache.json")
+CACHE_V = 1
+
+def _load_cache() -> dict:
+    try:
+        c = json.load(open(CACHE_PATH))
+        if c.get("v") == CACHE_V and isinstance(c.get("files"), dict):
+            return c
+    except Exception:
+        pass
+    return {"v": CACHE_V, "files": {}}
+
+def _save_cache(c: dict):
+    try:
+        os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+        tmp = f"{CACHE_PATH}.{os.getpid()}.tmp"   # pid-unique: two instances may scan at once
+        with open(tmp, "w") as f:
+            json.dump(c, f)
+        os.replace(tmp, CACHE_PATH)   # atomic: a concurrent reader never sees a half file
+    except Exception:
+        pass                          # cache is an optimization; never fail the scan
+
 # ---- per-session digest ----------------------------------------------------
 def _ts(s: str) -> float:
     try:
@@ -153,9 +184,29 @@ def _resume_dir(path: str, cwds: list[str]) -> str | None:
         return matches[0]
     return cwds[0] if cwds else None
 
-def digest(path: str) -> dict:
+# Cache-aware digest: reuse the parsed content when (mtime_ns, size) is
+# unchanged; recompute only idle_h (time-derived). cache=None -> always parse.
+def digest(path: str, cache: dict | None = None) -> dict:
     st = os.stat(path)
-    d = {"file": path, "sid": os.path.basename(path)[:8], "idle_h": None,
+    key = f"{st.st_mtime_ns}:{st.st_size}"
+    ent = cache["files"].get(path) if cache is not None else None
+    if ent is not None and ent.get("k") == key:
+        content = ent["d"]
+    else:
+        content = _parse(path)
+        if cache is not None:
+            cache["files"][path] = {"k": key, "d": content}
+            cache["dirty"] = True
+    d = dict(content)
+    last_ts = d.pop("_last_ts", 0.0)
+    d["idle_h"] = (NOW - last_ts) / 3600 if last_ts else (NOW - st.st_mtime) / 3600
+    return d
+
+# Full parse of one transcript -> the content-derived digest fields (everything
+# except idle_h) plus "_last_ts" (newest in-transcript message timestamp) for
+# the caller to turn into idle_h at read time.
+def _parse(path: str) -> dict:
+    d = {"file": path, "sid": os.path.basename(path)[:8],
          "title": None, "last_prompt": None, "cwd": None, "resume_cwd": None,
          "branch": None, "msgs": 0, "out_tok": 0, "last_role": None,
          "last_stop": None, "asks": False, "errored": False, "error_text": None}
@@ -225,7 +276,7 @@ def digest(path: str) -> dict:
     d["last_role"] = last_msg_role
     d["last_stop"] = last_assistant_stop
     d["resume_cwd"] = _resume_dir(path, cwds_seen) or d["cwd"]
-    d["idle_h"] = (NOW - last_ts) / 3600 if last_ts else (NOW - st.st_mtime) / 3600
+    d["_last_ts"] = last_ts   # digest() turns this into idle_h at read time
     # only the tail of the last assistant turn matters for this signal
     d["asks"] = bool(ASK.search(last_assistant_text[-300:]))
     d["errored"] = last_msg_is_error
@@ -278,8 +329,15 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
         names = {}
 
     sessions = []
-    for jf in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")):
-        d = digest(jf)
+    cache = _load_cache()
+    files = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))
+    # prune cache entries for deleted transcripts so the cache can't grow forever
+    stale = [p for p in cache["files"] if p not in set(files)]
+    for p in stale:
+        del cache["files"][p]
+        cache["dirty"] = True
+    for jf in files:
+        d = digest(jf, cache)
         cwd = d.get("cwd") or ""
         if repo_filter and repo_filter not in cwd:
             continue
@@ -310,6 +368,8 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
         # worktrees. KEEP named worktrees like impl/.claude/worktrees/aim-480.
         return not any(x in cwd for x in
                        ("/private/tmp", "/scratchpad", "/.claude/worktrees/agent-"))
+    if cache.pop("dirty", False):
+        _save_cache(cache)
     if not show_all and not repo_filter:
         sessions = [s for s in sessions if relevance(s)]
     order = {"a": 0, "b": 1, "c": 2}

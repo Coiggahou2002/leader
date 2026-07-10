@@ -33,9 +33,11 @@ let package = Package(
                 "archive.py", "backup-transcripts.sh", "config.py",
                 "launch.py", "leader-hook.py", "makeicon.swift", "name.py",
                 "pin.py", "scan.py", "test_switch.py",
-                "unread.py",
+                "unread.py", "__pycache__",
             ],
-            sources: ["LeaderApp.swift", "EmbeddedTerminal.swift", "QuakeTerminal.swift"]
+            sources: ["LeaderApp.swift", "EmbeddedTerminal.swift", "QuakeTerminal.swift",
+                      "DesignSystem.swift", "Model.swift", "Store.swift", "Activity.swift",
+                      "RowViews.swift", "AppDelegate.swift", "Sheets.swift"]
         ),
         .executableTarget(
             name: "replay",

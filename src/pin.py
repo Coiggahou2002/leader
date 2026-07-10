@@ -23,7 +23,10 @@ def _load() -> list:
 
 def _save(sids: list):
     os.makedirs(os.path.dirname(PATH), exist_ok=True)
-    json.dump({"sids": sids}, open(PATH, "w"))
+    tmp = f"{PATH}.{os.getpid()}.tmp"   # pid-unique: concurrent writers must not truncate each other's tmp
+    with open(tmp, "w") as f:
+        json.dump({"sids": sids}, f)
+    os.replace(tmp, PATH)   # atomic: scan.py's 6s reader must never see a half file
 
 def main():
     if len(sys.argv) < 2:

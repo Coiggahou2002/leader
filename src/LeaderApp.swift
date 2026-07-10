@@ -300,14 +300,6 @@ struct ContentView: View {
     }
     private var staleList: [Session] { store.sessions.filter { !$0.archived && !$0.pinned && $0.isStale } }
     private var archivedList: [Session] { store.sessions.filter(\.archived) }
-    // P1: the cross-tab "需要你" queue — sessions that finished a turn while you
-    // weren't looking (the reliable doneAway set from the live hook, i.e. the
-    // breathing-dot set). Shown at the top of EVERY tab so a session that finishes
-    // on another tab still surfaces. Ordered by cμ (asked-you first, then recent).
-    private var attentionList: [Session] {
-        store.sessions.filter { !$0.archived && sessionState($0) == .doneAway }
-            .sorted(by: byAttention)
-    }
     private var liveList: [Session] {
         store.sessions.filter { !$0.archived && term.running.contains($0.full_sid) }
             .sorted(by: byAttention)
@@ -782,7 +774,6 @@ struct ContentView: View {
                     // light, so eager layout is cheap and kills a whole class of
                     // "row visual doesn't update" bugs (highlight + stuck hover).
                     VStack(alignment: .leading, spacing: 2) {
-                        attentionStrip                 // P1: cross-tab "需要你" queue
                         switch mode {
                         case .active: activeContent
                         case .live: liveContent
@@ -834,48 +825,6 @@ struct ContentView: View {
             onPin: { store.setPinned(s, !s.pinned) }, onRename: { beginRename(s) },
             onMarkUnread: { store.setUnread(s, !s.unread) },
             selected: selectedID == s.id, showEmbedBadge: showEmbedBadge, hoveredID: $hoveredID)
-    }
-
-    // P1: "需要你" strip, rendered at the top of the list in every tab. Uses compact
-    // custom rows (NOT Row) on purpose: Row shares hoveredID/selection keyed on
-    // s.id, and a session in the strip also lives in its folder below — reusing Row
-    // would double-highlight on hover. These rows only share selection (correct: a
-    // session is selected or not, globally) and open on tap.
-    private static let attnAccent = Color(red: 0x8e / 255, green: 0x6a / 255, blue: 0xd9 / 255)
-    @ViewBuilder private var attentionStrip: some View {
-        let items = attentionList
-        if !items.isEmpty {
-            SectionHeader(title: "需要你", n: items.count,
-                          icon: "bell.badge.fill", iconTint: Self.attnAccent)
-            ForEach(items) { s in attentionRow(s) }
-            Divider().opacity(0.25)
-                .padding(.horizontal, DS.rowPadH).padding(.top, 6).padding(.bottom, 2)
-        }
-    }
-    private func attentionRow(_ s: Session) -> some View {
-        let sel = selectedID == s.id
-        return HStack(spacing: 8) {
-            if s.errored { ErrorPulse(help: s.error_text ?? "因 API 错误 / 连接中断卡住,需重发消息") }
-            else { BreathingDot() }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(s.name).font(.system(size: 13)).lineLimit(1)
-                Text(s.repo).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer(minLength: 4)
-            if s.asks {          // asked you a question → you're directly blocking it
-                Text("待答").font(.system(size: 9, weight: .bold))
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(Capsule().fill(Color.orange.opacity(0.20)))
-                    .foregroundStyle(.orange)
-                    .help("上一轮回答里向你提了问题")
-            }
-        }
-        .padding(.vertical, 5).padding(.horizontal, DS.rowPadH)
-        .background(RoundedRectangle(cornerRadius: DS.corner)
-            .fill(sel ? AnyShapeStyle(Color.primary.opacity(0.12)) : AnyShapeStyle(.clear)))
-        .contentShape(RoundedRectangle(cornerRadius: DS.corner))
-        .onTapGesture { openEmbedded(s) }
-        .help("完成于约 \(s.ago)前 · 点击打开")
     }
 
     @ViewBuilder private var liveContent: some View {

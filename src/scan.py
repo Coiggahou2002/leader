@@ -256,6 +256,7 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
     # pin order = position in pinned.json (pin time); drives the stable 置顶 sort
     pin_idx = {sid: i for i, sid in enumerate(_flag_list("pinned"))}
     unread = _flag_set("unread")
+    hidden = _flag_set("hidden")   # blacklist: dropped entirely (not even under 已归档)
     try:
         names = json.load(open(config.data_file("names.json")))
     except Exception:
@@ -270,6 +271,8 @@ def collect(repo_filter: str | None = None, show_all: bool = False) -> list:
         wt = wt_all.get(cwd)
         bucket = classify(d)
         full_sid = os.path.basename(d["file"])[:-6]
+        if full_sid in hidden:      # blacklisted → never surface anywhere
+            continue
         # "alive" = exactly identified as running (only --resume/hook sessions).
         # cwd-sibling liveness is too fuzzy to label a specific session active.
         alive = full_sid in sid2tty

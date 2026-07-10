@@ -975,8 +975,8 @@ struct ContentView: View {
             } else { arr += flatList }
             return arr
         case .live:     return liveList
-        case .stale:    return staleExpanded ? staleList.sorted { $0.idle_h < $1.idle_h } : []
-        case .archived: return archivedList.sorted(by: Self.byPriority)
+        case .stale:    return staleExpanded ? staleList.sorted(by: byAttention) : []
+        case .archived: return archivedList.sorted(by: byAttention)
         }
     }
     private func moveSelection(_ d: Int) {
@@ -1110,7 +1110,7 @@ struct ContentView: View {
         let q = paletteQuery.trimmingCharacters(in: .whitespaces)
         let base = q.isEmpty
             ? store.sessions.filter { !$0.archived }.sorted { $0.idle_h < $1.idle_h }
-            : store.sessions.filter { Self.sessionMatches($0, q) }.sorted(by: Self.byPriority)
+            : store.sessions.filter { Self.sessionMatches($0, q) }.sorted(by: byAttention)
         return Array(base.prefix(60))
     }
     // Level 2: the actions available on one session. Derived from that session's own
@@ -1212,14 +1212,22 @@ struct ContentView: View {
     }
     private var staleList: [Session] { store.sessions.filter { !$0.archived && !$0.pinned && $0.isStale } }
     private var archivedList: [Session] { store.sessions.filter(\.archived) }
+    // P1: the cross-tab "需要你" queue — sessions that finished a turn while you
+    // weren't looking (the reliable doneAway set from the live hook, i.e. the
+    // breathing-dot set). Shown at the top of EVERY tab so a session that finishes
+    // on another tab still surfaces. Ordered by cμ (asked-you first, then recent).
+    private var attentionList: [Session] {
+        store.sessions.filter { !$0.archived && sessionState($0) == .doneAway }
+            .sorted(by: byAttention)
+    }
     private var liveList: [Session] {
         store.sessions.filter { !$0.archived && term.running.contains($0.full_sid) }
-            .sorted { $0.idle_h < $1.idle_h }
+            .sorted(by: byAttention)
     }
     private var folders: [(name: String, items: [Session])] {
         let rest = store.sessions.filter { !$0.archived && !$0.pinned && !$0.isStale }
         return Dictionary(grouping: rest, by: \.repo)
-            .map { (name: $0.key, items: $0.value.sorted(by: Self.byPriority)) }
+            .map { (name: $0.key, items: $0.value.sorted(by: byAttention)) }
             .sorted { $0.name < $1.name }
     }
     // P0: the one place session state is derived. Order of checks = priority;
@@ -1232,13 +1240,20 @@ struct ContentView: View {
         if s.alive { return .waiting }
         return .closed
     }
-    private static func byPriority(_ l: Session, _ r: Session) -> Bool {
-        let lo = Session.order[l.bucket] ?? 9, ro = Session.order[r.bucket] ?? 9
-        return lo == ro ? l.idle_h < r.idle_h : lo < ro
+    // P1: cμ-flavoured attention ranking. Primary key = state (needs-you first).
+    // Within the SAME state, the one you're more directly blocking (it asked you a
+    // question) and can clear fastest (most recent = cheapest context switch) comes
+    // first. `asks` only orders sessions ALREADY in a needs-you state — it never
+    // moves a session between states (that's the noise trap scan.py warns about).
+    private func byAttention(_ l: Session, _ r: Session) -> Bool {
+        let ls = sessionState(l), rs = sessionState(r)
+        if ls != rs { return ls < rs }
+        if (ls == .doneAway || ls == .waiting) && l.asks != r.asks { return l.asks }
+        return l.idle_h < r.idle_h
     }
     // LRU: most-recently-used first (smallest idle first)
     private var flatList: [Session] {
-        store.sessions.filter { !$0.archived && !$0.pinned && !$0.isStale }.sorted { $0.idle_h < $1.idle_h }
+        store.sessions.filter { !$0.archived && !$0.pinned && !$0.isStale }.sorted(by: byAttention)
     }
     private func togglePin() {
         pinned.toggle(); AppDelegate.pinned = pinned
@@ -1679,6 +1694,7 @@ struct ContentView: View {
                     // light, so eager layout is cheap and kills a whole class of
                     // "row visual doesn't update" bugs (highlight + stuck hover).
                     VStack(alignment: .leading, spacing: 2) {
+                        attentionStrip                 // P1: cross-tab "需要你" queue
                         switch mode {
                         case .active: activeContent
                         case .live: liveContent
@@ -1732,6 +1748,47 @@ struct ContentView: View {
             selected: selectedID == s.id, showEmbedBadge: showEmbedBadge, hoveredID: $hoveredID)
     }
 
+    // P1: "需要你" strip, rendered at the top of the list in every tab. Uses compact
+    // custom rows (NOT Row) on purpose: Row shares hoveredID/selection keyed on
+    // s.id, and a session in the strip also lives in its folder below — reusing Row
+    // would double-highlight on hover. These rows only share selection (correct: a
+    // session is selected or not, globally) and open on tap.
+    private static let attnAccent = Color(red: 0x8e / 255, green: 0x6a / 255, blue: 0xd9 / 255)
+    @ViewBuilder private var attentionStrip: some View {
+        let items = attentionList
+        if !items.isEmpty {
+            SectionHeader(title: "需要你", n: items.count,
+                          icon: "bell.badge.fill", iconTint: Self.attnAccent)
+            ForEach(items) { s in attentionRow(s) }
+            Divider().opacity(0.25)
+                .padding(.horizontal, DS.rowPadH).padding(.top, 6).padding(.bottom, 2)
+        }
+    }
+    private func attentionRow(_ s: Session) -> some View {
+        let sel = selectedID == s.id
+        return HStack(spacing: 8) {
+            BreathingDot()
+            VStack(alignment: .leading, spacing: 1) {
+                Text(s.name).font(.system(size: 13)).lineLimit(1)
+                Text(s.repo).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            if s.asks {          // asked you a question → you're directly blocking it
+                Text("待答").font(.system(size: 9, weight: .bold))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.orange.opacity(0.20)))
+                    .foregroundStyle(.orange)
+                    .help("上一轮回答里向你提了问题")
+            }
+        }
+        .padding(.vertical, 5).padding(.horizontal, DS.rowPadH)
+        .background(RoundedRectangle(cornerRadius: DS.corner)
+            .fill(sel ? AnyShapeStyle(Color.primary.opacity(0.12)) : AnyShapeStyle(.clear)))
+        .contentShape(RoundedRectangle(cornerRadius: DS.corner))
+        .onTapGesture { openEmbedded(s) }
+        .help("完成于约 \(s.ago)前 · 点击打开")
+    }
+
     @ViewBuilder private var liveContent: some View {
         let items = liveList
         if items.isEmpty {
@@ -1746,7 +1803,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var staleContent: some View {
-        let items = staleList.sorted { $0.idle_h < $1.idle_h }
+        let items = staleList.sorted(by: byAttention)
         if items.isEmpty {
             ContentUnavailableView("没有陈旧会话",
                 systemImage: "clock.badge.xmark",
@@ -1764,7 +1821,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var archivedContent: some View {
-        let items = archivedList.sorted(by: Self.byPriority)
+        let items = archivedList.sorted(by: byAttention)
         if items.isEmpty {
             ContentUnavailableView("没有已归档的会话",
                 systemImage: "archivebox",

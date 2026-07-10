@@ -60,6 +60,10 @@ struct Session: Decodable, Identifiable {
     var pin_order: Int?
     var unread: Bool = false   // manually marked unread (red "1" badge); default keeps old data decodable
     var nickname: String?
+    // scan.py: does the last assistant turn actually ask the user something? Used
+    // ONLY to order sessions already known to need you (cμ tiebreak) — never to
+    // promote a session INTO the needs-you set. Default keeps old data decodable.
+    var asks: Bool = false
     var id: String { full_sid }
 
     var name: String {
@@ -74,6 +78,21 @@ struct Session: Decodable, Identifiable {
     var ago: String { idle_h < 48 ? "\(Int(idle_h.rounded()))h" : "\(Int((idle_h/24).rounded()))d" }
     var isStale: Bool { idle_h >= 15 * 24 }     // 最后消息 ≥ 15 天
     static let order = ["a": 0, "b": 1, "c": 2]
+}
+
+// P0 — the single, mutually-exclusive session state the sidebar ranks and groups
+// on. Derived ONLY from reliable live signals: the leader-hook turn lifecycle
+// (Activity.running / .attention) + scan-derived `alive`. Deliberately NOT from
+// transcript heuristics like `asks` — those fired far too often to drive
+// attention (see scan.py's removed "needs you" tier). Raw value = attention
+// priority, lowest = "most needs you", so a plain rawValue compare sorts the list.
+//   doneAway  finished a turn while you weren't looking — unacknowledged, needs you
+//   waiting   alive & idle (turn done, acknowledged) — open, awaiting your input
+//   working   reasoning right now — busy, does NOT need you
+//   closed    no live REPL — historical
+enum SessionState: Int, Comparable {
+    case doneAway = 0, waiting = 1, working = 2, closed = 3
+    static func < (a: SessionState, b: SessionState) -> Bool { a.rawValue < b.rawValue }
 }
 
 // MARK: - Backend (python scripts)
@@ -935,6 +954,11 @@ struct ContentView: View {
     @AppStorage("leader.grouped") private var grouped = true
     @Environment(\.colorScheme) private var scheme
     @ObservedObject private var term = TerminalManager.shared   // 活跃 tab: embed liveness
+    // P1: observe the turn-lifecycle store so the sidebar RE-SORTS when a session
+    // starts/finishes (folders/liveList rank by sessionState, which reads this).
+    // Without observing it here, only individual Rows re-render (dot/shimmer) and
+    // the order would stay stale until the next 6s scan re-ran body.
+    @ObservedObject private var activity = Activity.shared
 
     enum Focus { case list, openPath, palette }
     // "" -> launch.py uses config.new_session_cwd() (default ~). Configure in
@@ -1197,6 +1221,16 @@ struct ContentView: View {
         return Dictionary(grouping: rest, by: \.repo)
             .map { (name: $0.key, items: $0.value.sorted(by: Self.byPriority)) }
             .sorted { $0.name < $1.name }
+    }
+    // P0: the one place session state is derived. Order of checks = priority;
+    // Activity's sets are mutually exclusive by construction (see Activity.process),
+    // so at most one live state applies. `alive` gates .working exactly like the
+    // title shimmer, so a crashed session (no Stop) can't read as "working" forever.
+    private func sessionState(_ s: Session) -> SessionState {
+        if activity.attention.contains(s.full_sid) { return .doneAway }
+        if activity.running.contains(s.full_sid) && s.alive { return .working }
+        if s.alive { return .waiting }
+        return .closed
     }
     private static func byPriority(_ l: Session, _ r: Session) -> Bool {
         let lo = Session.order[l.bucket] ?? 9, ro = Session.order[r.bucket] ?? 9

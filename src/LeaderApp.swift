@@ -64,6 +64,11 @@ struct Session: Decodable, Identifiable {
     // ONLY to order sessions already known to need you (cμ tiebreak) — never to
     // promote a session INTO the needs-you set. Default keeps old data decodable.
     var asks: Bool = false
+    // scan.py: the last turn died mid-response on an API error / dropped connection
+    // and never resumed — the session looks "still running" but is stuck until you
+    // re-send. error_text is the specific message (row tooltip). Defaults decode-safe.
+    var errored: Bool = false
+    var error_text: String? = nil
     var id: String { full_sid }
 
     var name: String {
@@ -206,6 +211,10 @@ final class Store {
                 self.loading = false
                 guard e == self.epoch else { return }   // a write landed after this scan started → stale
                 self.sessions = s
+                // Fire stuck-at-error banners for sessions that newly died mid-turn.
+                let errs = s.filter { $0.errored && !$0.archived }
+                    .map { (sid: $0.full_sid, name: $0.name, text: $0.error_text) }
+                Activity.shared.reconcileErrored(errs)
             }
         }
     }
@@ -382,6 +391,36 @@ final class Activity: ObservableObject {
         UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
     }
 
+    // ---- Stuck-at-error banners (driven by scan.py's poll, NOT the hook) --------
+    // scan.py flags a session `errored` when its last turn died on an API error /
+    // dropped connection and never resumed. Store hands us that set after each scan;
+    // we fire a one-time banner when a session NEWLY enters that state (unless you're
+    // already looking at it). Seed silently on the first scan so sessions already
+    // stuck from before launch don't all banner at once. A recover-then-reerror
+    // re-notifies (the sid leaves knownErrored on the clean scan, so it's "new" again).
+    private var knownErrored: Set<String> = []
+    private var erroredSeeded = false
+    func reconcileErrored(_ now: [(sid: String, name: String, text: String?)]) {
+        let nowSet = Set(now.map(\.sid))
+        defer { knownErrored = nowSet }
+        guard erroredSeeded else { erroredSeeded = true; return }
+        for e in now where !knownErrored.contains(e.sid) {
+            if e.sid == focusedSID && appActive { continue }   // you're watching it die
+            postErrorNotification(e.sid, name: e.name, text: e.text)
+        }
+    }
+    private func postErrorNotification(_ sid: String, name: String, text: String?) {
+        guard Conf.notify else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "⚠️ " + name + " 卡住了"
+        content.body = text ?? "因 API 错误 / 连接中断中途停住,需要你重新发一条消息"
+        content.sound = .default
+        content.userInfo = ["sid": sid]   // reuses the tap→open plumbing (AppDelegate)
+        // stable per-session id → a re-error replaces its banner, doesn't stack
+        let req = UNNotificationRequest(identifier: "leader.error." + sid, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+    }
+
     private func readAll() -> [(String, Double, String)] {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: LeaderPaths.activityDir) else { return [] }
@@ -476,6 +515,25 @@ struct BreathingDot: View {
             .animation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true), value: on)
             .onAppear { on = true }
             .help("此会话已完成")
+    }
+}
+
+// A pulsing yellow warning for a session whose last turn died mid-response on an API
+// error / dropped connection and never resumed (scan.py: errored). It still looks
+// alive (the claude REPL is idling at its prompt), but is stuck until you re-send —
+// this surfaces that at a glance. Distinct color+shape from the purple 呼吸灯 (done).
+struct ErrorPulse: View {
+    @State private var on = false
+    var help: String
+    var body: some View {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(.yellow)
+            .opacity(on ? 1.0 : 0.3)
+            .shadow(color: .yellow.opacity(on ? 0.6 : 0), radius: on ? 3 : 0)
+            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: on)
+            .onAppear { on = true }
+            .help(help)
     }
 }
 
@@ -815,7 +873,9 @@ struct Row: View {
         return nil
     }
     // Guard on s.alive so a crashed session (no Stop event) can't shimmer forever.
-    private var isWorking: Bool { activity.running.contains(s.full_sid) && s.alive }
+    // Also suppress when errored: a turn that died on an API error looks "running"
+    // (no Stop fired) but is stuck — it must read as a warning, not as in-progress.
+    private var isWorking: Bool { activity.running.contains(s.full_sid) && s.alive && !s.errored }
     // Archive affordances derive from the session's own state — never passed in
     // by the surrounding list, so a row can't show 取消归档 after it moved back
     // to the active tab (or vice versa). Pin/unread only make sense un-archived.
@@ -832,7 +892,11 @@ struct Row: View {
                 Image(systemName: sym).font(.caption2).foregroundStyle(.secondary)
                     .help(sym == "terminal.fill" ? "已嵌入运行" : "已嵌入(进程已退出)")
             }
-            if activity.attention.contains(s.full_sid) { BreathingDot() }
+            if s.errored {
+                ErrorPulse(help: s.error_text ?? "上一轮因 API 错误 / 连接中断卡住了,需要你重新发一条消息")
+            } else if activity.attention.contains(s.full_sid) {
+                BreathingDot()
+            }
             Spacer(minLength: 4)
             // ••• more-actions, hidden until the row is hovered/selected. The actual
             // click is caught by MouseLayer's trailing zone (acceptsFirstMouse), which
@@ -1767,7 +1831,8 @@ struct ContentView: View {
     private func attentionRow(_ s: Session) -> some View {
         let sel = selectedID == s.id
         return HStack(spacing: 8) {
-            BreathingDot()
+            if s.errored { ErrorPulse(help: s.error_text ?? "因 API 错误 / 连接中断卡住,需重发消息") }
+            else { BreathingDot() }
             VStack(alignment: .leading, spacing: 1) {
                 Text(s.name).font(.system(size: 13)).lineLimit(1)
                 Text(s.repo).font(.caption2).foregroundStyle(.secondary).lineLimit(1)

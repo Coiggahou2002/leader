@@ -158,7 +158,7 @@ def digest(path: str) -> dict:
     d = {"file": path, "sid": os.path.basename(path)[:8], "idle_h": None,
          "title": None, "last_prompt": None, "cwd": None, "resume_cwd": None,
          "branch": None, "msgs": 0, "out_tok": 0, "last_role": None,
-         "last_stop": None, "asks": False}
+         "last_stop": None, "asks": False, "errored": False, "error_text": None}
     cwds_seen: list[str] = []   # ordered-unique cwds, to pick the resume dir
     # last activity = newest in-transcript message timestamp, NOT file mtime
     # (a background indexer rewrites these files and pollutes mtime).
@@ -166,6 +166,8 @@ def digest(path: str) -> dict:
     last_assistant_stop = None
     last_assistant_text = ""
     last_msg_role = None
+    last_msg_is_error = False   # is the FINAL conversation message an API-error entry?
+    last_error_text = None
     try:
         with open(path, "rb") as fh:
             data = fh.read()
@@ -208,12 +210,26 @@ def digest(path: str) -> dict:
                     b.get("text", "") for b in c if isinstance(b, dict))
                 if txt.strip():
                     last_assistant_text = txt
+                # A turn that dies mid-response on an API error / dropped connection
+                # is written as an assistant entry flagged isApiErrorMessage (covers
+                # both "API Error: ..." and the yellow "Connection closed"). If this
+                # ends up being the LAST conversation message, the session is stuck —
+                # it won't self-heal (transcripts show recovery needs a human re-send).
+                if e.get("isApiErrorMessage"):
+                    last_msg_is_error = True
+                    last_error_text = (txt or "").strip()[:140]
+                else:
+                    last_msg_is_error = False
+            else:                       # a user message clears the stuck-at-error flag
+                last_msg_is_error = False
     d["last_role"] = last_msg_role
     d["last_stop"] = last_assistant_stop
     d["resume_cwd"] = _resume_dir(path, cwds_seen) or d["cwd"]
     d["idle_h"] = (NOW - last_ts) / 3600 if last_ts else (NOW - st.st_mtime) / 3600
     # only the tail of the last assistant turn matters for this signal
     d["asks"] = bool(ASK.search(last_assistant_text[-300:]))
+    d["errored"] = last_msg_is_error
+    d["error_text"] = last_error_text if last_msg_is_error else None
     return d
 
 # ---- bucketing (apply the rules) -------------------------------------------

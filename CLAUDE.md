@@ -5,6 +5,31 @@ Native macOS cockpit for many Claude Code sessions. SwiftUI shell (`src/LeaderAp
 (`src/*.py`, bundled into the app). Build+install: `./build.sh` → `dist/Leader.app`,
 then `rm -rf ~/Applications/Leader.app && cp -R dist/Leader.app ~/Applications/`.
 
+## Terminal rendering & input (SwiftTerm fork)
+
+The embedded terminal is our SwiftTerm fork (`Coiggahou2002/SwiftTerm`, branch
+`leader-line-height`, revision-pinned in `Package.swift`). Two local patches live
+there: `lineHeightMultiplier` (see the Package.swift TODO about upstream #585) and
+Metal-renderer glyph centering for that multiplier. If you bump line-height behavior,
+patch BOTH renderers (CG `drawTerminalContents` + `MetalTerminalRenderer`'s two
+`yOffset` sites) or text sits low in the cell on one path.
+
+- **Renderer**: Metal GPU path on by default (`term_metal` in
+  `~/.config/leader/config.json`; toggle in Settings, falls back to CG if Metal init
+  fails). Rationale: claude's TUI full-repaints every frame (we force it via
+  `CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT=1` to dodge SwiftTerm's non-grapheme-aware
+  CJK wrap drift), and the CG path re-rasterizes the whole grid on the CPU main
+  thread per frame — typing lags. The full-bounds `setNeedsDisplay` promotion in
+  `EmbeddedTerminalView` is CG-only; Metal routes through `requestMetalDisplay`.
+- **Cursor**: `term_cursor_style` config key (default `steadyBar`), applied in
+  `applyTermTheme` via `setCursorStyle`; DECSCUSR from apps still overrides.
+- **IME preedit**: SwiftTerm's `NSTextInputClient` marked-text methods are stubs
+  (`setMarkedText` discards the string), so `EmbeddedTerminalView` overrides them
+  and shows the composing pinyin in an overlay label pinned to the caret. Purely
+  presentational — nothing reaches the PTY until the IME commits. SwiftTerm marks
+  `resignFirstResponder` public-not-open, hence the `viewWillMove(toSuperview:)`
+  hook for discarding compositions on session switch.
+
 ## Shipping releases (Sparkle auto-update + CI)
 
 The app updates itself via **Sparkle**: it reads an appcast from GitHub Releases

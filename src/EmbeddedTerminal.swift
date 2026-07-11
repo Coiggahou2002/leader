@@ -41,6 +41,12 @@ enum Conf {
     // name is accepted: steadyBar/blinkBar/steadyBlock/blinkBlock/steadyUnderline/
     // blinkUnderline. Programs inside the terminal can still override via DECSCUSR.
     static var termCursorStyle: String { (dict["term_cursor_style"] as? String) ?? "steadyBar" }
+    // GPU (Metal) renderer. claude's TUI full-repaints every frame (see
+    // fullRepaintExport below), and SwiftTerm's default CoreGraphics path
+    // re-rasterizes the whole grid on the CPU main thread per frame — key events
+    // queue behind drawing and typing feels laggy. On by default; turn off to
+    // fall back to the CG renderer if the (experimental) GPU path misbehaves.
+    static var termMetal: Bool { (dict["term_metal"] as? Bool) ?? true }
     // Common monospaced families, filtered to those actually installed so the
     // Settings picker never offers a font that won't resolve.
     static let monoFontChoices: [String] = {
@@ -210,6 +216,14 @@ func applyTermTheme(_ tv: LocalProcessTerminalView) {
     // setCursorStyle no-ops when unchanged, so reapplyTheme() is idempotent; the
     // change reaches both renderers (CG CaretView + Metal buildCursorDrawData).
     tv.getTerminal().setCursorStyle(CursorStyle.from(string: Conf.termCursorStyle) ?? .steadyBar)
+    // perFrameAggregated: rebuild GPU buffers for the whole frame instead of
+    // caching per-row — the right mode for our forced full-repaint workload.
+    tv.metalBufferingMode = .perFrameAggregated
+    do { try tv.setUseMetal(Conf.termMetal) }   // idempotent; safe from reapplyTheme()
+    catch {
+        // No Metal device (VM, old GPU): stay on the CG renderer, just note it.
+        NSLog("Leader: Metal renderer unavailable, falling back to CoreGraphics: \(error)")
+    }
 }
 
 final class EmbeddedTerminalView: LocalProcessTerminalView {
@@ -228,10 +242,15 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
     // or during the post-resize window. Normal buffer otherwise keeps the efficient
     // incremental path. (Known limitation: even a full repaint doesn't fully fix
     // fullscreen *scroll*; /tui default scrolls fine.)
+    // With the Metal renderer the terminal content is drawn by an MTKView on top
+    // of this view (updateDisplay routes to requestMetalDisplay, not here), so the
+    // promotion would only burn CPU re-rasterizing pixels nobody sees — skip it.
     public override func setNeedsDisplay(_ invalidRect: NSRect) {
-        let alt = terminal?.isCurrentBufferAlternate ?? false
-        if alt || Date() < fullRepaintUntil { super.setNeedsDisplay(bounds) }
-        else { super.setNeedsDisplay(invalidRect) }
+        if !isUsingMetalRenderer {
+            let alt = terminal?.isCurrentBufferAlternate ?? false
+            if alt || Date() < fullRepaintUntil { super.setNeedsDisplay(bounds); return }
+        }
+        super.setNeedsDisplay(invalidRect)
     }
     public override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)               // emulator reflows + SIGWINCH

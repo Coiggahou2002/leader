@@ -15,7 +15,7 @@ let package = Package(
         // point back at the upstream tag and rename `tv.lineHeightMultiplier` ->
         // `tv.lineSpacing` in EmbeddedTerminal.swift (applyTermTheme).
         .package(url: "https://github.com/Coiggahou2002/SwiftTerm.git",
-                 revision: "d59975b82d12d3a1e2d4f624a78c3621a4e33b35"),
+                 revision: "519d1129855460c658645af9c1b7c7f793ae8ef9"),
         // In-app auto-update (appcast on GitHub Releases). Sparkle ships as a
         // binary XCFramework; build.sh embeds Sparkle.framework into the bundle
         // and adds the @executable_path/../Frameworks rpath (swift build alone

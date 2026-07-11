@@ -239,6 +239,96 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
         terminal?.updateFullScreen()
         needsDisplay = true
     }
+    // ── IME preedit (marked text) ────────────────────────────────────────────
+    // SwiftTerm's NSTextInputClient marked-text methods are stubs: setMarkedText
+    // discards the string and hasMarkedText always answers false, so composing
+    // pinyin was invisible — you typed blind until committing a candidate. The
+    // composition itself already works (the IME owns the keystrokes; nothing
+    // reaches the PTY until commit), so this is purely presentational: keep the
+    // preedit string and show it in an overlay label pinned to the caret.
+    private var preedit = ""
+    private let preeditLabel = NSTextField(labelWithString: "")
+
+    private func clearPreedit() {
+        preedit = ""
+        preeditLabel.removeFromSuperview()
+    }
+    private func showPreedit(selectedRange: NSRange) {
+        // Rebuild style on every update: font/colors can change via Settings.
+        let attr = NSMutableAttributedString(string: preedit, attributes: [
+            .font: font,
+            .foregroundColor: nativeForegroundColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ])
+        let ns = preedit as NSString
+        if selectedRange.location != NSNotFound, selectedRange.length > 0,
+           selectedRange.location + selectedRange.length <= ns.length {
+            // The clause the IME is currently converting: thicker underline.
+            attr.addAttribute(.underlineStyle, value: NSUnderlineStyle.thick.rawValue,
+                              range: selectedRange)
+        }
+        preeditLabel.attributedStringValue = attr
+        preeditLabel.drawsBackground = true
+        preeditLabel.backgroundColor = nativeBackgroundColor   // occlude the cells beneath
+        preeditLabel.sizeToFit()
+        // Pin to the caret cell. firstRect() is the caret frame in screen coords;
+        // it stays current under the Metal renderer too (updateCursorPosition keeps
+        // moving the hidden caret view). Clamp so long preedits never overflow.
+        var origin = CGPoint.zero
+        let screen = firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: nil)
+        if screen != .zero, let window {
+            let caret = convert(window.convertFromScreen(screen), from: nil)
+            origin = CGPoint(x: caret.minX, y: caret.minY + (caret.height - preeditLabel.frame.height) / 2)
+        }
+        origin.x = max(0, min(origin.x, bounds.width - preeditLabel.frame.width))
+        origin.y = max(0, min(origin.y, bounds.height - preeditLabel.frame.height))
+        preeditLabel.setFrameOrigin(origin)
+        if preeditLabel.superview !== self { addSubview(preeditLabel) }  // topmost: above MTKView
+    }
+
+    // NSTextInputClient — super only tracks kitty-protocol composing state; layer
+    // the real marked-text bookkeeping on top of it.
+    public override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        preedit = (string as? NSAttributedString)?.string ?? (string as? String ?? "")
+        if preedit.isEmpty { clearPreedit() } else { showPreedit(selectedRange: selectedRange) }
+    }
+    public override func unmarkText() {
+        super.unmarkText()
+        clearPreedit()
+    }
+    public override func hasMarkedText() -> Bool { !preedit.isEmpty }
+    public override func markedRange() -> NSRange {
+        preedit.isEmpty ? NSRange(location: NSNotFound, length: 0)
+                        : NSRange(location: 0, length: (preedit as NSString).length)
+    }
+    public override func attributedSubstring(forProposedRange range: NSRange,
+                                             actualRange: NSRangePointer?) -> NSAttributedString? {
+        let ns = preedit as NSString
+        guard range.location != NSNotFound, range.location < ns.length else { return nil }
+        let clamped = NSRange(location: range.location,
+                              length: min(range.length, ns.length - range.location))
+        actualRange?.pointee = clamped
+        return NSAttributedString(string: ns.substring(with: clamped))
+    }
+    public override func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+        [.underlineStyle, .markedClauseSegment]
+    }
+    public override func insertText(_ string: Any, replacementRange: NSRange) {
+        clearPreedit()   // commit: the terminal's own cells take over from here
+        super.insertText(string, replacementRange: replacementRange)
+    }
+    // Switching sessions reparents this view mid-composition (SwiftTerm marks
+    // resignFirstResponder public-not-open, so hook the reparent itself); drop
+    // the composition instead of leaving a stale overlay behind.
+    public override func viewWillMove(toSuperview newSuperview: NSView?) {
+        super.viewWillMove(toSuperview: newSuperview)
+        if !preedit.isEmpty {
+            inputContext?.discardMarkedText()
+            clearPreedit()
+        }
+    }
+
     func handleScroll(_ event: NSEvent) -> Bool {
         guard let term = terminal else { return false }
         let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY * 12

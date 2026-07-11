@@ -47,6 +47,54 @@ struct VisualEffect: NSViewRepresentable {
     func updateNSView(_ v: NSVisualEffectView, context: Context) {}
 }
 
+// Opaque colour for the custom split divider (ContentView.splitDivider), per appearance:
+// a light grey line in light mode, a dark grey line in dark mode. Fully opaque so the
+// hairline never reads as see-through.
+let splitDividerColor = NSColor(name: nil) { app in
+    app.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        ? NSColor(calibratedWhite: 0.24, alpha: 1)   // ~#3d3d3d on dark
+        : NSColor(calibratedWhite: 0.85, alpha: 1)   // ~#d9d9d9 on light
+}
+
+extension Comparable {
+    func clamped(_ lo: Self, _ hi: Self) -> Self { min(max(self, lo), hi) }
+}
+
+// Drag handle for the custom split divider. Must be an AppKit view: the window is
+// borderless/movable-by-background, so a SwiftUI gesture here competes with the window
+// move and jitters. mouseDownCanMoveWindow=false claims the mouse for resizing instead;
+// the view also shows the resize cursor. Overlaid (wider than the 1px line) so it gives a
+// comfortable grab zone without adding layout width.
+final class SplitDragHandleView: NSView {
+    var range: ClosedRange<CGFloat> = 0...0
+    var current: CGFloat = 0                 // live sidebar width, refreshed from SwiftUI
+    var onResize: ((CGFloat) -> Void)?
+    private var startWidth: CGFloat = 0
+    private var startX: CGFloat = 0
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
+    override func mouseDown(with e: NSEvent) {
+        startWidth = current
+        startX = e.locationInWindow.x
+    }
+    override func mouseDragged(with e: NSEvent) {
+        let dx = e.locationInWindow.x - startX
+        onResize?((startWidth + dx).rounded().clamped(range.lowerBound, range.upperBound))
+    }
+}
+struct SplitDragHandle: NSViewRepresentable {
+    @Binding var width: CGFloat
+    var range: ClosedRange<CGFloat>
+    func makeNSView(context: Context) -> SplitDragHandleView { configured(SplitDragHandleView()) }
+    func updateNSView(_ v: SplitDragHandleView, context: Context) { _ = configured(v) }
+    private func configured(_ v: SplitDragHandleView) -> SplitDragHandleView {
+        v.range = range
+        v.current = width
+        v.onResize = { width = $0 }
+        return v
+    }
+}
+
 // Low-contrast overlay scrollbar knob (Codex-like). The system .light knob on a
 // dark UI is glaringly bright; draw a subtle rounded knob and no track instead.
 final class SubtleScroller: NSScroller {

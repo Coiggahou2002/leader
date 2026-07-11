@@ -39,6 +39,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             other.activate(options: [.activateAllWindows])
             exit(0)
         }
+        // Test/demo hook: pin the app to a fixed appearance regardless of the system
+        // setting, so an isolated instance can be shown in light (or dark) without
+        // flipping the whole OS. Unset in normal use. Set here (before the window is
+        // built) so the first paint is already correct.
+        switch ProcessInfo.processInfo.environment["LEADER_FORCE_APPEARANCE"] {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
+        default:      break
+        }
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {

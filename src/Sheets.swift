@@ -121,6 +121,7 @@ struct SettingsSheet: View {
     @State private var fontSize: CGFloat
     @State private var lineHeight: CGFloat
     @State private var softColors: Bool
+    @State private var followAppearance: Bool
     @State private var cursorStyle: String
     @State private var metal: Bool
     @State private var notify: Bool
@@ -138,6 +139,7 @@ struct SettingsSheet: View {
         _fontSize = State(initialValue: Conf.termFontSize)
         _lineHeight = State(initialValue: Conf.lineHeight)
         _softColors = State(initialValue: Conf.softColors)
+        _followAppearance = State(initialValue: Conf.followAppearance)
         _cursorStyle = State(initialValue: Conf.termCursorStyle)
         _metal = State(initialValue: Conf.termMetal)
         _notify = State(initialValue: Conf.notify)
@@ -181,8 +183,11 @@ struct SettingsSheet: View {
                         ForEach(Self.cursorStyles, id: \.value) { Text($0.label).tag($0.value) }
                     }.labelsHidden()
                 }
-                Toggle("柔和配色(Kaku Dark)", isOn: $softColors)
-                Text("套用 Kaku Dark 主题:16 色 ANSI 调色板 + 深色背景/前景/光标,让 claude-hud 进度条等只发索引色的程序不再刺眼。关闭则回到默认自适应配色。")
+                Toggle("柔和配色(Kaku)", isOn: $softColors)
+                Text("套用 Kaku 主题:16 色 ANSI 调色板 + 背景/前景/光标,让 claude-hud 进度条等只发索引色的程序不再刺眼。深色下为 Kaku Dark,浅色下自动切到浅色变体。关闭则回到默认自适应配色。")
+                    .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+                Toggle("跟随系统浅色/深色", isOn: $followAppearance)
+                Text("系统切换浅色/深色时,终端配色实时跟随;claude 会话以 auto 主题启动并订阅终端配色通知,切换外观时无需重开即可实时换主题(通过 --settings 注入,仅对 Leader 启动的会话生效,不改动全局 ~/.claude 设置)。关闭则终端固定 Kaku Dark、claude 固定深色主题。")
                     .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
                 Toggle("GPU 渲染(Metal)", isOn: $metal)
                 Text("用 GPU 绘制终端内容,大幅降低打字与滚动时的重绘开销(claude 的 TUI 每帧全屏重绘,CPU 渲染会拖慢输入)。如遇显示异常可关闭,立即回退 CPU 渲染。")
@@ -231,6 +236,7 @@ struct SettingsSheet: View {
                                "term_font_size": Double(fontSize),
                                "line_height": Double(lineHeight),
                                "soft_colors": softColors,
+                               "term_follow_appearance": followAppearance,
                                "term_cursor_style": cursorStyle,
                                "term_metal": metal,
                                "notify": notify])

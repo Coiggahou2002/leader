@@ -117,9 +117,21 @@ enum Backend {
     }
 }
 
+// Config/state roots, overridable via env so an isolated (test/demo) instance can
+// point at a scratch dir without touching the real one. Unset in normal use → the
+// same hard-coded paths as before, so zero behavior change.
+func leaderConfigDir() -> String {
+    let env = ProcessInfo.processInfo.environment["LEADER_CONFIG_DIR"]
+    return NSString(string: (env?.isEmpty == false ? env! : "~/.config/leader")).expandingTildeInPath
+}
+func leaderDataDir() -> String {
+    let env = ProcessInfo.processInfo.environment["LEADER_DATA_DIR"]
+    return NSString(string: (env?.isEmpty == false ? env! : "~/.claude/leader")).expandingTildeInPath
+}
+
 // MARK: - Leader data paths + hook install
 enum LeaderPaths {
-    static let dataDir = NSString(string: "~/.claude/leader").expandingTildeInPath
+    static let dataDir = leaderDataDir()
     // Per-session turn-lifecycle records written by leader-hook.py (Stop / etc.),
     // watched by Activity to pulse the sidebar. Kept separate from scan.py's
     // `registry` (live-pane mapping) so the two concerns don't collide.
@@ -137,9 +149,18 @@ enum LeaderPaths {
 func ensureLeaderHookSettings() -> String {
     let cmd = "/usr/bin/python3 '\(LeaderPaths.hookScript)' '\(LeaderPaths.activityDir)'"
     let entry: [[String: Any]] = [["hooks": [["type": "command", "command": cmd]]]]
-    let json: [String: Any] = ["hooks": [
+    var json: [String: Any] = ["hooks": [
         "UserPromptSubmit": entry, "Stop": entry, "SessionEnd": entry,
     ]]
+    // Theme for Leader-spawned claude sessions. Merged over the user's own settings
+    // (via --settings), so it affects only sessions we launch and never touches
+    // ~/.claude/settings.json.
+    //   follow ON  → "auto": claude detects light/dark from the terminal (OSC 11) at
+    //                startup AND follows live — it subscribes to DEC mode 2031 at
+    //                launch, and EmbeddedTerminalView pushes it a CSI ?997 notification
+    //                whenever the appearance flips, so it re-themes without a restart.
+    //   follow OFF → "dark": the terminal is pinned to Kaku Dark, so match it.
+    json["theme"] = Conf.followAppearance ? "auto" : "dark"
     let fm = FileManager.default
     try? fm.createDirectory(atPath: LeaderPaths.dataDir, withIntermediateDirectories: true)
     guard let data = try? JSONSerialization.data(withJSONObject: json),

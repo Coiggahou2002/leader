@@ -5,6 +5,31 @@ Native macOS cockpit for many Claude Code sessions. SwiftUI shell (`src/LeaderAp
 (`src/*.py`, bundled into the app). Build+install: `./build.sh` → `dist/Leader.app`,
 then `rm -rf ~/Applications/Leader.app && cp -R dist/Leader.app ~/Applications/`.
 
+## Terminal rendering & input (SwiftTerm fork)
+
+The embedded terminal is our SwiftTerm fork (`Coiggahou2002/SwiftTerm`, branch
+`leader-line-height`, revision-pinned in `Package.swift`). Two local patches live
+there: `lineHeightMultiplier` (see the Package.swift TODO about upstream #585) and
+Metal-renderer glyph centering for that multiplier. If you bump line-height behavior,
+patch BOTH renderers (CG `drawTerminalContents` + `MetalTerminalRenderer`'s two
+`yOffset` sites) or text sits low in the cell on one path.
+
+- **Renderer**: Metal GPU path on by default (`term_metal` in
+  `~/.config/leader/config.json`; toggle in Settings, falls back to CG if Metal init
+  fails). Rationale: claude's TUI full-repaints every frame (we force it via
+  `CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT=1` to dodge SwiftTerm's non-grapheme-aware
+  CJK wrap drift), and the CG path re-rasterizes the whole grid on the CPU main
+  thread per frame — typing lags. The full-bounds `setNeedsDisplay` promotion in
+  `EmbeddedTerminalView` is CG-only; Metal routes through `requestMetalDisplay`.
+- **Cursor**: `term_cursor_style` config key (default `steadyBar`), applied in
+  `applyTermTheme` via `setCursorStyle`; DECSCUSR from apps still overrides.
+- **IME preedit**: SwiftTerm's `NSTextInputClient` marked-text methods are stubs
+  (`setMarkedText` discards the string), so `EmbeddedTerminalView` overrides them
+  and shows the composing pinyin in an overlay label pinned to the caret. Purely
+  presentational — nothing reaches the PTY until the IME commits. SwiftTerm marks
+  `resignFirstResponder` public-not-open, hence the `viewWillMove(toSuperview:)`
+  hook for discarding compositions on session switch.
+
 ## Shipping releases (Sparkle auto-update + CI)
 
 The app updates itself via **Sparkle**: it reads an appcast from GitHub Releases
@@ -53,6 +78,19 @@ inside-out **before** signing the framework and the app. Ad-hoc-signing the app 
 launch needs a one-time Gatekeeper bypass (right-click → Open, or
 `xattr -dr com.apple.quarantine Leader.app`). Sparkle strips quarantine on the updates
 it installs, so every subsequent auto-update relaunches cleanly.
+
+## Session restore across restarts
+
+Quit dialog (`AppDelegate.applicationShouldTerminate`) offers a macOS-logout-style
+"下次启动时恢复这些会话" checkbox (last choice remembered as `restore_on_quit` in
+config.json). Checked → the running sessions' (sid, cwd) + the active sid are written
+to `~/.config/leader/restore.json` (`RestoreState` in EmbeddedTerminal.swift);
+`ContentView.restoreSessions()` (onAppear) consumes the file — **read-then-delete
+before spawning**, so a crash can't loop into mass-spawning claudes — batch-opens
+each via `TerminalManager.terminal(forSid:cwd:)`, and embeds the previously active
+one through `activeEmbed`'s isOpen fallback (works before the first scan lands).
+Consequence: restore fires only after a clean quit with the box checked; a crash
+restores nothing (deliberate).
 
 ## Hard-won lessons (read before touching sidebar / terminal state)
 

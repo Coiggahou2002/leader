@@ -165,8 +165,6 @@ struct SettingsSheet: View {
                     .lineLimit(1).truncationMode(.tail)
                     .padding(6).frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
-                Text("行距无法调整:终端引擎(SwiftTerm)按字体自身度量决定行高,不提供行距设置。")
-                    .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
                 Toggle("柔和配色(Kaku Dark)", isOn: $softColors)
                 Text("套用 Kaku Dark 主题:16 色 ANSI 调色板 + 深色背景/前景/光标,让 claude-hud 进度条等只发索引色的程序不再刺眼。关闭则回到默认自适应配色。")
                     .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)

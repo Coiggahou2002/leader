@@ -360,9 +360,11 @@ struct ContentView: View {
             Activity.shared.displayName = { sid in
                 store.sessions.first(where: { $0.full_sid == sid })?.name ?? "Claude 会话"
             }
+            restoreSessions()
         }
         .onChange(of: activeSID) { _, id in
             updateQuakeCwd(); Activity.shared.markFocused(id)
+            TerminalManager.shared.lastActiveSid = id   // for the quit dialog's restore file
             hoveredID = nil   // switch kills any stale hover on the previous row
         }
         .sheet(item: $renameTarget) { s in
@@ -406,6 +408,20 @@ struct ContentView: View {
         } message: {
             Text("会杀掉「\(closeTarget?.name ?? "")」的嵌入进程(transcript 已保存,可重新打开)。Leader 不会退出。")
         }
+    }
+
+    // Reopen the sessions saved by the quit dialog (macOS-style "恢复会话").
+    // consume() is one-shot — the file is deleted before any spawn, so a crash
+    // here can't loop into mass-spawning claudes on every launch. Runs before
+    // the first scan lands: terminal(forSid:) is self-contained (sid + cwd),
+    // and activeEmbed's isOpen fallback shows the front session immediately.
+    private func restoreSessions() {
+        guard let r = RestoreState.consume() else { return }
+        for e in r.sessions { _ = TerminalManager.shared.terminal(forSid: e.sid, cwd: e.cwd) }
+        let front = r.active.flatMap { a in r.sessions.first { $0.sid == a }?.sid }
+            ?? r.sessions.first?.sid
+        if let front { selectedID = front; activeSID = front }
+        store.flash("已恢复 \(r.sessions.count) 个会话")
     }
 
     // Close one session's embedded terminal (Cmd+W target or the header ✕).
@@ -654,6 +670,12 @@ struct ContentView: View {
         }
         if let p = pendingNew, p.sid == id {
             return ActiveEmbed(sid: p.sid, cwd: p.cwd, name: "新会话", session: nil)
+        }
+        // Restored-at-launch session the first scan hasn't caught up with yet:
+        // its terminal is already open in TerminalManager, embed it right away
+        // (the scanned row replaces this stub name within a refresh cycle).
+        if TerminalManager.shared.isOpen(id), let cwd = TerminalManager.shared.cwd(forSid: id) {
+            return ActiveEmbed(sid: id, cwd: cwd, name: "会话 \(id.prefix(8))", session: nil)
         }
         return nil
     }

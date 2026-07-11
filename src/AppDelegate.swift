@@ -132,17 +132,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             ? [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary] : [.managed]
     }
     // Quitting kills every embedded claude. Confirm if any session is live so a
-    // stray Cmd+Q doesn't tear down running work.
+    // stray Cmd+Q doesn't tear down running work, and offer a macOS-logout-style
+    // "restore on next launch" checkbox: when checked, the running sessions are
+    // written to RestoreState and ContentView.onAppear respawns them next launch.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let n = TerminalManager.shared.running.count
-        guard n > 0 else { return .terminateNow }
+        let snapshot = TerminalManager.shared.restoreSnapshot
+        guard !snapshot.isEmpty else { return .terminateNow }
         let a = NSAlert()
         a.messageText = "退出 Leader?"
-        a.informativeText = "还有 \(n) 个嵌入的会话在运行,退出会杀掉它们的进程(transcript 已持久化,可重新 resume)。"
+        a.informativeText = "还有 \(snapshot.count) 个嵌入的会话在运行,退出会杀掉它们的进程(transcript 已持久化,可重新 resume)。"
+        let box = NSButton(checkboxWithTitle: "下次启动时恢复这些会话", target: nil, action: nil)
+        box.state = Conf.restoreOnQuit ? .on : .off   // dialog remembers the last choice
+        box.sizeToFit()
+        a.accessoryView = box
         a.addButton(withTitle: "退出")
         a.addButton(withTitle: "取消")
         a.alertStyle = .warning
-        return a.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+        guard a.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+        let restore = box.state == .on
+        Conf.save(["restore_on_quit": restore])
+        if restore {
+            RestoreState.save(RestoreFile(sessions: snapshot,
+                                          active: TerminalManager.shared.lastActiveSid))
+        } else {
+            RestoreState.clear()   // stale file from an earlier quit must not resurrect
+        }
+        return .terminateNow
     }
 
     // Show banners even when Leader is frontmost — you may be watching one session's

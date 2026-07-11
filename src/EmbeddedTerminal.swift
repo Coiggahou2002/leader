@@ -47,6 +47,9 @@ enum Conf {
     // queue behind drawing and typing feels laggy. On by default; turn off to
     // fall back to the CG renderer if the (experimental) GPU path misbehaves.
     static var termMetal: Bool { (dict["term_metal"] as? Bool) ?? true }
+    // Last state of the quit dialog's "restore sessions on next launch" checkbox
+    // (macOS logout-style: the dialog remembers your previous choice).
+    static var restoreOnQuit: Bool { (dict["restore_on_quit"] as? Bool) ?? true }
     // Common monospaced families, filtered to those actually installed so the
     // Settings picker never offers a font that won't resolve.
     static let monoFontChoices: [String] = {
@@ -405,13 +408,56 @@ func installScrollMonitor() {
     }
 }
 
+// Sessions to reopen on the next launch, written by the quit dialog when its
+// "恢复会话" checkbox is on (macOS logout-style). One-shot by design: consume()
+// deletes the file before spawning anything, so a crash during restore can't
+// loop into repeatedly mass-spawning claude processes.
+struct RestoreEntry: Codable {
+    let sid: String
+    let cwd: String
+}
+struct RestoreFile: Codable {
+    let sessions: [RestoreEntry]
+    let active: String?   // the session the main pane showed at quit
+}
+enum RestoreState {
+    static let path = NSString(string: "~/.config/leader/restore.json").expandingTildeInPath
+    static func save(_ file: RestoreFile) {
+        let url = URL(fileURLWithPath: path)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let d = try? JSONEncoder().encode(file) { try? d.write(to: url) }
+    }
+    static func clear() { try? FileManager.default.removeItem(atPath: path) }
+    static func consume() -> RestoreFile? {
+        guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        clear()
+        guard let f = try? JSONDecoder().decode(RestoreFile.self, from: d),
+              !f.sessions.isEmpty else { return nil }
+        return f
+    }
+}
+
 @MainActor
 final class TerminalManager: ObservableObject {
     static let shared = TerminalManager()
     private var views: [String: EmbeddedTerminalView] = [:]
+    // cwd each open session was spawned in — self-contained restore data, so
+    // reopening after a relaunch never depends on scan.py having run yet.
+    private var cwds: [String: String] = [:]
+    // Mirrors ContentView's activeSID (set in its .onChange) so the quit dialog
+    // in AppDelegate can persist which session the main pane was showing.
+    var lastActiveSid: String?
     @Published var running: Set<String> = []
     @Published var exited: Set<String> = []
     private let delegate = TermDelegate()
+
+    // What the quit dialog offers to restore: every running embedded session
+    // with the cwd it was spawned in. Sorted for a deterministic file.
+    var restoreSnapshot: [RestoreEntry] {
+        running.sorted().compactMap { sid in cwds[sid].map { RestoreEntry(sid: sid, cwd: $0) } }
+    }
+    func cwd(forSid sid: String) -> String? { cwds[sid] }
 
     func terminal(forSid sid: String, cwd: String) -> EmbeddedTerminalView {
         if let v = views[sid] { return v }
@@ -423,6 +469,7 @@ final class TerminalManager: ObservableObject {
         tv.startProcess(executable: "/bin/zsh", args: ["-lc", resumeCommand(sid: sid)],
                         environment: termCleanEnv(), currentDirectory: expandTilde(cwd))
         views[sid] = tv
+        cwds[sid] = cwd
         markRunningDeferred(sid)
         return tv
     }
@@ -439,6 +486,7 @@ final class TerminalManager: ObservableObject {
         tv.startProcess(executable: "/bin/zsh", args: ["-lc", newSessionCommand(sid: sid)],
                         environment: termCleanEnv(), currentDirectory: expandTilde(cwd))
         views[sid] = tv
+        cwds[sid] = cwd
         markRunningDeferred(sid)
         return tv
     }
@@ -461,6 +509,7 @@ final class TerminalManager: ObservableObject {
         // Doing it before terminate() also means the async processTerminated ->
         // markExited (below) sees the view untracked and won't re-add `exited`.
         running.remove(sid); exited.remove(sid)
+        cwds.removeValue(forKey: sid)
         if let v = views[sid] {
             views.removeValue(forKey: sid)
             // Kill the whole process GROUP: the child is `zsh -lc "claude …"`, and

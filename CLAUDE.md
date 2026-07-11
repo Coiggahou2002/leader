@@ -79,6 +79,19 @@ launch needs a one-time Gatekeeper bypass (right-click → Open, or
 `xattr -dr com.apple.quarantine Leader.app`). Sparkle strips quarantine on the updates
 it installs, so every subsequent auto-update relaunches cleanly.
 
+## Session restore across restarts
+
+Quit dialog (`AppDelegate.applicationShouldTerminate`) offers a macOS-logout-style
+"下次启动时恢复这些会话" checkbox (last choice remembered as `restore_on_quit` in
+config.json). Checked → the running sessions' (sid, cwd) + the active sid are written
+to `~/.config/leader/restore.json` (`RestoreState` in EmbeddedTerminal.swift);
+`ContentView.restoreSessions()` (onAppear) consumes the file — **read-then-delete
+before spawning**, so a crash can't loop into mass-spawning claudes — batch-opens
+each via `TerminalManager.terminal(forSid:cwd:)`, and embeds the previously active
+one through `activeEmbed`'s isOpen fallback (works before the first scan lands).
+Consequence: restore fires only after a clean quit with the box checked; a crash
+restores nothing (deliberate).
+
 ## Hard-won lessons (read before touching sidebar / terminal state)
 
 These are not style preferences. Each one cost a full debug cycle. The sidebar has

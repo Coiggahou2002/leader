@@ -37,6 +37,10 @@ enum Conf {
         let v = (dict["line_height"] as? Double).map { CGFloat($0) } ?? 1.2
         return min(2.0, max(1.0, v))
     }
+    // Cursor style, wezterm-style thin bar by default. Any SwiftTerm CursorStyle
+    // name is accepted: steadyBar/blinkBar/steadyBlock/blinkBlock/steadyUnderline/
+    // blinkUnderline. Programs inside the terminal can still override via DECSCUSR.
+    static var termCursorStyle: String { (dict["term_cursor_style"] as? String) ?? "steadyBar" }
     // Common monospaced families, filtered to those actually installed so the
     // Settings picker never offers a font that won't resolve.
     static let monoFontChoices: [String] = {
@@ -203,6 +207,9 @@ func applyTermTheme(_ tv: LocalProcessTerminalView) {
     } else {
         tv.installColors(defaultAnsiPalette)
     }
+    // setCursorStyle no-ops when unchanged, so reapplyTheme() is idempotent; the
+    // change reaches both renderers (CG CaretView + Metal buildCursorDrawData).
+    tv.getTerminal().setCursorStyle(CursorStyle.from(string: Conf.termCursorStyle) ?? .steadyBar)
 }
 
 final class EmbeddedTerminalView: LocalProcessTerminalView {

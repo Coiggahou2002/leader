@@ -121,7 +121,14 @@ struct SettingsSheet: View {
     @State private var fontSize: CGFloat
     @State private var lineHeight: CGFloat
     @State private var softColors: Bool
+    @State private var cursorStyle: String
     @State private var notify: Bool
+    // Display name -> SwiftTerm CursorStyle raw name (what CursorStyle.from parses).
+    private static let cursorStyles: [(label: String, value: String)] = [
+        ("竖线", "steadyBar"), ("竖线·闪烁", "blinkBar"),
+        ("块状", "steadyBlock"), ("块状·闪烁", "blinkBlock"),
+        ("下划线", "steadyUnderline"), ("下划线·闪烁", "blinkUnderline"),
+    ]
     init() {
         let p = Conf.proxy
         _enabled = State(initialValue: !p.isEmpty)
@@ -130,6 +137,7 @@ struct SettingsSheet: View {
         _fontSize = State(initialValue: Conf.termFontSize)
         _lineHeight = State(initialValue: Conf.lineHeight)
         _softColors = State(initialValue: Conf.softColors)
+        _cursorStyle = State(initialValue: Conf.termCursorStyle)
         _notify = State(initialValue: Conf.notify)
     }
     var body: some View {
@@ -165,6 +173,12 @@ struct SettingsSheet: View {
                     .lineLimit(1).truncationMode(.tail)
                     .padding(6).frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
+                HStack {
+                    Text("光标").frame(width: 44, alignment: .leading)
+                    Picker("", selection: $cursorStyle) {
+                        ForEach(Self.cursorStyles, id: \.value) { Text($0.label).tag($0.value) }
+                    }.labelsHidden()
+                }
                 Toggle("柔和配色(Kaku Dark)", isOn: $softColors)
                 Text("套用 Kaku Dark 主题:16 色 ANSI 调色板 + 深色背景/前景/光标,让 claude-hud 进度条等只发索引色的程序不再刺眼。关闭则回到默认自适应配色。")
                     .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
@@ -212,6 +226,7 @@ struct SettingsSheet: View {
                                "term_font_size": Double(fontSize),
                                "line_height": Double(lineHeight),
                                "soft_colors": softColors,
+                               "term_cursor_style": cursorStyle,
                                "notify": notify])
                     // If notifications were just enabled, (re)request authorization now.
                     if notify {

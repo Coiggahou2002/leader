@@ -42,17 +42,23 @@ the tag) → else `./VERSION` → else `1.0`. Sparkle compares `CFBundleVersion`
 release **must be a strictly higher version than the last** or existing installs won't
 see it. Keep `./VERSION` in sync with the tag you cut.
 
-**Cutting a release — CI (preferred).** Push a tag and GitHub Actions
-(`.github/workflows/release.yml`) does the rest:
+**Cutting a release — CI (preferred).** Just kick off the workflow with a version;
+CI does everything else — bumps `./VERSION`, commits it to `main`, creates + pushes the
+tag, builds on a `macos-14` (arm64) runner, ad-hoc-signs, regenerates the signed
+appcast, and publishes the Release via the built-in `GITHUB_TOKEN`:
 ```
-# bump ./VERSION to match, commit, then:
-git tag v1.2 && git push origin v1.2
+gh workflow run release.yml -f version=1.6      # no leading v; no local steps needed
 ```
-The workflow builds on a `macos-14` (arm64) runner, ad-hoc-signs, regenerates the
-signed appcast, and publishes the Release via the built-in `GITHUB_TOKEN`. The tag
-**is** the version (leading `v` stripped). You can also trigger it manually:
-`gh workflow run release.yml -f version=1.2`.
-- **Merging to `main` does NOT release.** Only a `v*` tag push (or manual dispatch)
+(Or Actions → Release → Run workflow.) You do **not** bump `./VERSION` or tag by hand on
+this path. Alternatively, push a tag yourself (`git tag v1.6 && git push origin v1.6`) —
+but then you must have already bumped `./VERSION` to match, since the tag **is** the
+version (leading `v` stripped).
+
+**Release notes are auto-generated** (`release.sh`) from the commits since the previous
+`v*` tag, grouped into 新增功能 / 修复 / 其他变更 / 包含的提交 by conventional-commit
+prefix (`feat:` / `fix:` / …) plus a compare link. Write commit subjects accordingly so
+they land in the right bucket. (The checkout uses `fetch-depth: 0` so the diff works.)
+- **Merging to `main` does NOT release.** Only a manual dispatch or a `v*` tag push
   does — this is deliberate, so ordinary merges don't ship versions.
 
 **Cutting a release — local fallback.** Bump `./VERSION`, then `./release.sh` (build →

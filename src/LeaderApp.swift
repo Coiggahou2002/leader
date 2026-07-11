@@ -28,6 +28,7 @@ struct ContentView: View {
     @State private var pathCands: [String] = []      // dir completions, scanned off-main per input change
     @State private var confirmCloseActive = false    // Cmd+W confirm
     @State private var closeTarget: (sid: String, name: String)?   // what Cmd+W will close
+    @State private var sidebarWidth: CGFloat = DS.panelWidth       // custom split (replaces HSplitView)
     // Cmd+K command palette. Two levels: nil paletteActionsFor = session search;
     // non-nil = the drill-in action list for that one session. paletteSel indexes
     // whichever list is active; paletteQuery filters it.
@@ -340,17 +341,52 @@ struct ContentView: View {
         (NSApp.delegate as? AppDelegate)?.applyLevel()
     }
 
-    var body: some View {
-        HSplitView {
+    private var clampedSidebarWidth: CGFloat { min(460, max(280, sidebarWidth)) }
+
+    // The split line: a single opaque device-pixel. The grab zone is a wider AppKit view
+    // overlaid on top (SplitDragHandle) — a SwiftUI gesture here fights the borderless
+    // window's move-by-background and jitters; the AppKit view claims the mouse instead
+    // (mouseDownCanMoveWindow=false). The overlay adds no layout width, so the panes stay
+    // flush against the 1px line. sidebarWidth is kept integer so the line stays crisp.
+    private var splitDivider: some View {
+        Rectangle()
+            .fill(Color(nsColor: splitDividerColor))
+            .frame(width: 1.0 / (NSScreen.main?.backingScaleFactor ?? 2))
+            .frame(maxHeight: .infinity)
+            .ignoresSafeArea()   // run the line full height incl. the top titlebar strip;
+                                 // otherwise that 1px column shows the black window backing
+            .overlay {
+                SplitDragHandle(width: $sidebarWidth, range: 280...460)
+                    .frame(width: 12)
+            }
+    }
+
+    // Custom split instead of HSplitView: the AppKit split view reserves a gap between
+    // panes backed by translucent window material, so any divider drawn over it let that
+    // material show through ("漏色的缝"). An HStack butts the two opaque panes flush
+    // against a fully opaque 1px line — no gap, no translucent backdrop, so it can't read
+    // as see-through. Drag-to-resize is reimplemented on the line. Extracted from `body`
+    // to keep that ViewBuilder under the Swift type-checker's expression budget.
+    private var splitBody: some View {
+        HStack(spacing: 0) {
             sidebar
-                .frame(minWidth: 280, idealWidth: DS.panelWidth, maxWidth: 460,
-                       maxHeight: .infinity)
+                .frame(width: clampedSidebarWidth)
+                .frame(maxHeight: .infinity)
+            splitDivider
             terminalArea
                 .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
                 .background(TerminalAreaProbe())   // anchors the scratch terminal over this pane
                 .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
         }
-        .ignoresSafeArea()                          // let both panes fill under the transparent titlebar
+    }
+
+    var body: some View {
+        // No .ignoresSafeArea() here: HStack (unlike the old HSplitView) would push the
+        // pane *content* to y=0, shoving the sidebar tab bar up under the traffic lights.
+        // The pane backgrounds already ignore the safe area on their own (VisualEffect /
+        // windowBackgroundColor), so they still fill under the transparent titlebar while
+        // content stays below it — matching the original HSplitView layout.
+        splitBody
         .overlay { openPathPanel }
         .overlay { commandPalette }
         .frame(minWidth: 820, minHeight: 480)

@@ -1,8 +1,13 @@
 name: Release
 
 # Cut a release from CI. Two ways to trigger:
-#   • push a tag:      git tag v1.2 && git push origin v1.2   (tag == version)
-#   • manually:        Actions → Release → Run workflow → enter a version
+#   • manually (does everything): Actions → Release → Run workflow → enter a version,
+#     or `gh workflow run release.yml -f version=1.6`. CI bumps ./VERSION, commits it
+#     to main, creates+pushes the tag, then builds + generates the changelog + publishes.
+#   • push a tag:      git tag v1.2 && git push origin v1.2   (tag == version). Use this
+#     only if you've already bumped ./VERSION locally to match.
+# Either way the GitHub Release notes are auto-generated from the commits since the
+# previous tag (see release.sh), grouped into 新增功能 / 修复 / 其他变更 / 包含的提交.
 #
 # Requires one repository secret, SPARKLE_ED_PRIVATE_KEY — the base64 EdDSA key
 # exported from your keychain (generate_keys -x). The built-in GITHUB_TOKEN
@@ -25,6 +30,8 @@ jobs:
     runs-on: macos-14        # Apple Silicon → arm64 build, matching local releases
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history + tags, so release.sh can diff for the changelog
 
       - name: Resolve version
         id: v
@@ -35,6 +42,28 @@ jobs:
             V="${GITHUB_REF_NAME#v}"          # strip leading v from the tag
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      # Manual dispatch is the full release path: bump ./VERSION, commit it to main,
+      # and create + push the tag — all here, so no local steps are needed. (A GITHUB_TOKEN
+      # push does NOT re-trigger the tags trigger below, so this won't double-run.)
+      - name: Bump VERSION, commit & tag (manual dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${{ steps.v.outputs.version }}"
+          TAG="v$V"
+          if git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1; then
+            echo "::error::tag $TAG already exists on origin — pick a higher version"; exit 1
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s\n' "$V" > VERSION
+          git add VERSION
+          git commit -m "chore: bump VERSION to $V"
+          git tag "$TAG"
+          git push origin HEAD:main
+          git push origin "$TAG"
 
       - name: Build, sign appcast, publish release
         env:

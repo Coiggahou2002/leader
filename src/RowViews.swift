@@ -190,8 +190,13 @@ struct MouseLayer: NSViewRepresentable {
 }
 
 // MARK: - Row
+// Renders any provider's session (AnySession). The left edge carries the
+// provider's brand logo so the All-in-One list shows where each session lives.
+// Claude-only decorations (shimmer / breathing dot / ErrorPulse) are inert for
+// other providers: their `alive`/`errored` are always false and the Activity
+// sets only ever contain Claude sids.
 struct Row: View {
-    let s: Session
+    let s: AnySession
     let onOpen: () -> Void
     let onArchive: () -> Void
     var onPin: () -> Void = {}
@@ -206,12 +211,12 @@ struct Row: View {
     @ObservedObject var activity = Activity.shared       // turn-completion pulse
     // single shared hovered id -> at most one row highlights, even mid-scroll
     private var hover: Bool { hoveredID == s.id }
-    // embedded-terminal badge: filled while the in-app claude process is alive,
+    // embedded-terminal badge: filled while the in-app CLI process is alive,
     // hollow once it exits, nothing if never embedded. Quiet grey either way —
     // "actively working" is signalled by the title shimmer, not by color here.
     private var embedSymbol: String? {
-        if term.running.contains(s.full_sid) { return "terminal.fill" }
-        if term.exited.contains(s.full_sid) { return "terminal" }
+        if term.running.contains(s.termKey) { return "terminal.fill" }
+        if term.exited.contains(s.termKey) { return "terminal" }
         return nil
     }
     // Guard on s.alive so a crashed session (no Stop event) can't shimmer forever.
@@ -227,6 +232,12 @@ struct Row: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            // Provider brand mark (All-in-One: shows where this session lives).
+            if let logo = ProviderLogos.image(for: s.kind) {
+                Image(nsImage: logo).interpolation(.high).resizable().scaledToFit()
+                    .frame(width: 15, height: 15)
+                    .help(providerLabel(s.kind))
+            }
             Text(s.name).font(.system(size: 14)).lineLimit(1)
                 .workingShimmer(isWorking)
             if s.unread { UnreadBadge() }

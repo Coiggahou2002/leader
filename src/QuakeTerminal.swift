@@ -49,10 +49,11 @@ final class QuakeTerminal: NSObject {
     // centered over this, never wider than it.
     weak var anchorView: NSView?
 
-    // ContentView keeps this pointed at the active session's cwd; captured when the
-    // shell is (re)created, so a collapsed-and-reopened terminal keeps its dir but a
-    // ✕-closed one reopens wherever you are now.
+    // ContentView/KimiContentView keep this pointed at the active session's cwd.
+    // If the cwd changes while the scratch shell is collapsed, we tear down the
+    // old shell so the next show() spawns a fresh one in the new directory.
     var currentCwd: String = NSHomeDirectory()
+    private var shellCwd: String?
 
     // MARK: hotkey (double-tap Control)
     // Local monitor: fires only while Leader is the active app, which is exactly
@@ -86,6 +87,9 @@ final class QuakeTerminal: NSObject {
     func toggle() { visible ? collapse() : show() }
 
     func show() {
+        if panel != nil, shellCwd != currentCwd {
+            closeForReal()   // active session changed dir: spawn a fresh scratch shell
+        }
         let p = ensurePanel()
         let g = geometry()
         p.setFrame(g.hidden, display: false)
@@ -139,8 +143,10 @@ final class QuakeTerminal: NSObject {
     private func geometry() -> (shown: NSRect, hidden: NSRect) {
         let m: CGFloat = 8
         if let a = anchorScreenRect() {
-            let w = max(300, a.width - m * 2)
-            let h = min(a.height - m * 2, max(240, a.height * 0.62))
+            // Keep the scratch panel clearly subordinate: ~40% of the terminal area,
+            // centered over the right pane (matches Claude Code's transient terminal).
+            let w = max(300, (a.width - m * 2) * 0.92)
+            let h = min(a.height - m * 2, max(240, a.height * 0.45))
             let x = a.minX + (a.width - w) / 2
             return (NSRect(x: x, y: a.maxY - h - m, width: w, height: h),   // just below top edge
                     NSRect(x: x, y: a.maxY + 4, width: w, height: h))        // just above top edge
@@ -195,6 +201,7 @@ final class QuakeTerminal: NSObject {
                         environment: quakeShellEnv(),
                         currentDirectory: expandTilde(currentCwd))
         self.term = tv
+        self.shellCwd = currentCwd
 
         bar.translatesAutoresizingMaskIntoConstraints = false
         tv.translatesAutoresizingMaskIntoConstraints = false

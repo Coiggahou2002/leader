@@ -30,6 +30,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/backend"
 cp "$BIN/Leader" "$APP/Contents/MacOS/Leader"
 cp "$ASSET/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 [ -e "$ROOT/assets/claude-logo.png" ] && cp "$ROOT/assets/claude-logo.png" "$APP/Contents/Resources/claude-logo.png"
+[ -e "$ROOT/assets/openai-logo.png" ] && cp "$ROOT/assets/openai-logo.png" "$APP/Contents/Resources/openai-logo.png"
+[ -e "$ROOT/assets/kimi-logo.png" ] && cp "$ROOT/assets/kimi-logo.png" "$APP/Contents/Resources/kimi-logo.png"
 # SwiftPM resource bundles (e.g. SwiftTerm_SwiftTerm.bundle, which carries
 # Shaders.metal for the Metal renderer). Bundle.module resolves these from
 # Contents/Resources at runtime; without them the Metal path silently falls
@@ -37,7 +39,7 @@ cp "$ASSET/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 for b in "$BIN"/*.bundle; do
   [ -e "$b" ] && cp -R "$b" "$APP/Contents/Resources/"
 done
-for f in config.py scan.py launch.py archive.py pin.py name.py unread.py leader-hook.py; do
+for f in config.py scan.py codex-scan.py kimi-scan.py launch.py archive.py pin.py name.py unread.py leader-hook.py; do
   cp "$SRC/$f" "$APP/Contents/Resources/backend/$f"
 done
 

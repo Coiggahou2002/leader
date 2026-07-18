@@ -1,9 +1,93 @@
 # CLAUDE.md — Leader (embedded-app)
 
-Native macOS cockpit for many Claude Code sessions. SwiftUI shell (`src/LeaderApp.swift`,
-`src/EmbeddedTerminal.swift`, `src/QuakeTerminal.swift`) over read-only Python
-(`src/*.py`, bundled into the app). Build+install: `./build.sh` → `dist/Leader.app`,
-then `rm -rf ~/Applications/Leader.app && cp -R dist/Leader.app ~/Applications/`.
+Native macOS cockpit for Claude Code, Codex and Kimi sessions, in ONE unified
+list. SwiftUI shell (`src/LeaderApp.swift` = app entry + provider rail,
+`src/SessionsView.swift` = the single sessions view used for every rail tab,
+`src/SessionStore.swift` = merged store, `src/UnifiedSession.swift` = the
+cross-provider model, `src/EmbeddedTerminal.swift`, `src/QuakeTerminal.swift`)
+over read-only Python (`src/*.py`, bundled into the app). Build+install:
+`./build.sh` → `dist/Leader.app`, then
+`rm -rf ~/Applications/Leader.app && cp -R dist/Leader.app ~/Applications/`.
+
+## Unified architecture (All-in-One)
+
+The left rail has four entries — **All** (`square.grid.2x2` SF Symbol) then the
+three brand logos — persisted in `@AppStorage("leader.providerFilter")`. Every
+entry renders the SAME `SessionsView(filter:)`; the filter is just a parameter,
+so there is exactly one list implementation and one set of shortcuts.
+
+- **`AnySession`** (UnifiedSession.swift) is the union model: the 7 fields all
+  three scanners share, plus Optional/defaulted Claude-only enrichment
+  (`alive/asks/errored/branch/…`). `id` = `"kind:sid"` (list identity);
+  `termKey` = TerminalManager key (claude stays BARE — legacy restore.json
+  contract). Capability flags (`hasActivitySignals` / `canOpenInKitty` /
+  `canCreate`) drive which menu items and row decorations a provider gets;
+  Codex/Kimi rows honestly degrade (no shimmer/breathing-dot/ErrorPulse).
+- **`SessionStore`** (SessionStore.swift) merges the three scan loops (Claude
+  6 s, Codex/Kimi 10 s) into one `[AnySession]`. Claude mutations keep the old
+  epoch guard (scan.py round-trip); Codex/Kimi mutations write a JSON override
+  store synchronously and replay after each scan, so no epoch is needed there.
+  Also owns `~/.config/leader/last-opened.json` — the LRU sort's data source
+  (app UI state, not provider data).
+- **Overrides** (`SessionOverrideStore` protocol): Claude keeps its python
+  scripts + `~/.claude/leader/*.json` (external contract, scan.py merges);
+  Kimi keeps `~/.config/leader/kimi-overrides.json` (same format as the old
+  `KimiOverrides`); Codex gained the same mechanism via
+  `~/.config/leader/codex-overrides.json` — archive/pin/unread/rename now work
+  for Codex too. Archiving also unpins, uniformly.
+- **Sorting** (会话 tab, bottom-bar cycle, `@AppStorage("leader.sortMode")`):
+  folder (repo groups, cross-provider in All view) → activity (attention-ranked;
+  Claude hook signals, others idle_h) → LRU (`last-opened.json`, never-opened
+  fall back to idle_h). Row left edge shows the provider logo (15 pt, from the
+  shared pre-downsampled `ProviderLogos`).
+- The three decode structs (`Session`/`CodexSession`/`KimiSession`) remain the
+  wire contract with the python backend; the UI only sees `AnySession`.
+
+The rail brand logos live in `assets/{claude,openai,kimi}-logo.png` (copied into
+the bundle by `build.sh`) and are loaded ONCE, pre-downsampled to 108 px with
+high-quality interpolation (`ProviderLogos`) — drawing the 1000 px sources at
+15–28 pt aliases. Selection uses `Color.primary.opacity` instead of accentColor.
+
+## Codex fleet boundary
+
+`src/codex-scan.py` implements a read-only integration: enumerate
+`~/.codex/session_index.jsonl`, obtain the original cwd from the session's
+`session_meta`, and host `codex resume <uuid>` in the existing SwiftTerm shell.
+Leader-side flags (archive/pin/unread/nickname) are Leader-owned state in
+`codex-overrides.json`, NOT Codex data.
+
+Do **not** route Codex through `leader-hook.py`, Claude's JSONL scanner, or
+`--dangerously-skip-permissions`. Codex's local event format is not a Leader-owned
+contract, and this integration preserves Codex's own approval and sandbox defaults.
+Codex has no `--session-id` equivalent, so ⌘⇧O quick-create is unavailable there
+(`canCreate == false`).
+
+## Kimi fleet boundary
+
+`src/kimi-scan.py` implements a read-only integration: enumerate
+`~/.kimi-code/session_index.jsonl`, read title/cwd from the session's
+`state.json`, and host `kimi -S <session-id>` in the existing SwiftTerm shell.
+
+⌘⇧O creates a new Kimi session via `TerminalManager.newKimiSession`, keyed under
+a synthetic `new-<hex>` sid because Kimi has no `--session-id`; the real sid
+lands in the index on the next scan. Tab membership follows the same invariant
+as Claude: archived is exclusive; 活跃 = `TerminalManager.running` only.
+
+Do **not** route Kimi through `leader-hook.py`, Claude's JSONL scanner, or
+`--dangerously-skip-permissions`. Kimi's local event format is not a Leader-owned
+contract, and this integration preserves Kimi's own approval and sandbox defaults.
+Kimi sids are namespaced as `kimi:<sid>` inside `TerminalManager` so they never
+collide with Claude/Codex terminals. (`RenameSheet` is provider-agnostic: pass
+`originalTitle`, not a session.)
+
+`QuakeTerminal` anchors its floating scratch panel to the detail pane via
+`TerminalAreaProbe()`. `SessionsView` sets this probe as the terminal pane's
+background — without it, double-tap Control falls back to screen-centered
+geometry and the panel looks misplaced. The scratch terminal's cwd follows the
+active session of ANY provider: `SessionsView.updateQuakeCwd()` resolves the
+active termKey back to a session (`kindAndSid(fromTermKey:)`) and writes
+`QuakeTerminal.shared.currentCwd`; `show()` tears down the old shell if the cwd
+changed.
 
 ## Terminal rendering & input (SwiftTerm fork)
 
@@ -23,6 +107,17 @@ patch BOTH renderers (CG `drawTerminalContents` + `MetalTerminalRenderer`'s two
   `EmbeddedTerminalView` is CG-only; Metal routes through `requestMetalDisplay`.
 - **Cursor**: `term_cursor_style` config key (default `steadyBar`), applied in
   `applyTermTheme` via `setCursorStyle`; DECSCUSR from apps still overrides.
+- **Color env is pinned, not inherited.** `termCleanEnv()` strips `TERM`,
+  `COLORTERM`, `NO_COLOR`, `NODE_DISABLE_COLORS` from the inherited env and
+  always sets `TERM=xterm-256color` + `COLORTERM=truecolor`. Reason: launching
+  Leader via `open` from a TUI shell **propagates that shell's env** — a kimi/
+  claude CLI session exports `NO_COLOR=1` + `TERM=dumb`, and every embedded TUI
+  then renders monochrome (Node honors `NO_COLOR`; everything honors
+  `TERM=dumb`). Symptoms are renderer-independent (CG and Metal both "lose
+  color"), so if colors ever look wrong, `ps eww -p <leader-pid>` the launch
+  env FIRST before suspecting SwiftTerm — the parse/map/render pipeline was
+  verified end-to-end (headless `Terminal.feed` + offscreen `LocalProcessTerminalView`
+  rasterize truecolor correctly).
 - **IME preedit**: SwiftTerm's `NSTextInputClient` marked-text methods are stubs
   (`setMarkedText` discards the string), so `EmbeddedTerminalView` overrides them
   and shows the composing pinyin in an overlay label pinned to the caret. Purely
@@ -83,12 +178,14 @@ it installs, so every subsequent auto-update relaunches cleanly.
 
 Quit dialog (`AppDelegate.applicationShouldTerminate`) offers a macOS-logout-style
 "下次启动时恢复这些会话" checkbox (last choice remembered as `restore_on_quit` in
-config.json). Checked → the running sessions' (sid, cwd) + the active sid are written
-to `~/.config/leader/restore.json` (`RestoreState` in EmbeddedTerminal.swift);
-`ContentView.restoreSessions()` (onAppear) consumes the file — **read-then-delete
-before spawning**, so a crash can't loop into mass-spawning claudes — batch-opens
-each via `TerminalManager.terminal(forSid:cwd:)`, and embeds the previously active
-one through `activeEmbed`'s isOpen fallback (works before the first scan lands).
+config.json). Checked → the running sessions' (termKey, cwd) + the active termKey
+are written to `~/.config/leader/restore.json` (`RestoreState` in
+EmbeddedTerminal.swift); `SessionsView.restoreSessions()` (onAppear) consumes the
+file — **read-then-delete before spawning**, so a crash can't loop into
+mass-spawning CLIs — batch-opens each via `TerminalManager.terminal(forStoredKey:cwd:)`
+(the key recovers the provider, so a restored Codex/Kimi session gets ITS resume
+command, not claude's), and embeds the previously active one through
+`activeEmbed`'s isOpen fallback (works before the first scan lands).
 Consequence: restore fires only after a clean quit with the box checked; a crash
 restores nothing (deliberate).
 
@@ -152,3 +249,24 @@ set-but-not-rendered" is happening, then fix that. Remove the logging when done.
 inode, so a running instance keeps the old code). One whole cycle was lost to a
 "fixed it" that was never installed. Always do the `cp -R` and confirm the running
 process is the new binary (check the exe mtime).
+
+### 6. Verify on the tab that has the bug, and confirm your clicks actually landed
+The Kimi/Codex "empty column next to the rail" saga: the root cause was one line —
+`KimiView`/`CodexView`'s HSplitView detail pane declared only `minWidth: 520` with
+no `maxWidth: .infinity` (unlike `ContentView`), so HSplitView dumped the extra
+width into the sidebar pane, whose `maxWidth: 430` content then **centered**
+(`frame(minWidth:idealWidth:maxWidth:)` defaults `alignment: .center`), leaving a
+~115 pt leading margin that looked like an outer-layout gap. But the hours were
+lost to process failures, not the fix:
+- The app launches on the **Claude** tab, which never had the bug — rounds of
+  "fix → screenshot" verified a healthy page. Reproduce the broken state first,
+  then iterate there.
+- Coordinate clicks (`CGEvent`/`cliclick`-style) went to the **frontmost window
+  (Chrome)**, not Leader, so the tab never switched and the "unchanged" screenshot
+  was misread as layout data. Drive the app via AX instead:
+  `System Events → process "Leader" → set frontmost → click (first button whose
+  help is "Kimi")` (`entire contents of window 1`), then `screencapture -l <wid>`.
+- When a layout gap resists reasoning, **own the pixels**: give each candidate
+  view a translucent debug overlay (red/green/blue), screenshot, and see which
+  view's frame covers the gap. One instrumented screenshot ended the guessing.
+  Remove all debug overlays before shipping.

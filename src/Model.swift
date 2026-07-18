@@ -3,6 +3,11 @@
 // Split out of LeaderApp.swift; pure move, no logic changes.
 import Foundation
 
+enum TerminalKind: String, CaseIterable, Identifiable {
+    case claude, codex, kimi
+    var id: Self { self }
+}
+
 // MARK: - Model
 struct Session: Decodable, Identifiable {
     let full_sid: String
@@ -50,6 +55,33 @@ struct Session: Decodable, Identifiable {
     static let order = ["a": 0, "b": 1, "c": 2]
 }
 
+// MARK: - Codex/Kimi scan wire contracts
+// These structs are only the decode targets for codex-scan.py / kimi-scan.py
+// output — the UI never touches them directly (it sees AnySession, which these
+// are adapted into). Leader-side flags (archived/pinned/…) are NOT decoded here;
+// they're replayed from JsonOverrideStore after each scan.
+struct CodexSession: Decodable, Identifiable {
+    let full_sid: String
+    let sid: String
+    let title: String?
+    let cwd: String?
+    let resume_cwd: String?
+    let idle_h: Double
+    let file: String?
+    var id: String { full_sid }
+}
+
+struct KimiSession: Decodable, Identifiable {
+    let full_sid: String
+    let sid: String
+    let title: String?
+    let cwd: String?
+    let resume_cwd: String?
+    let idle_h: Double
+    let file: String?
+    var id: String { full_sid }
+}
+
 // P0 — the single, mutually-exclusive session state the sidebar ranks and groups
 // on. Derived ONLY from reliable live signals: the leader-hook turn lifecycle
 // (Activity.running / .attention) + scan-derived `alive`. Deliberately NOT from
@@ -72,7 +104,7 @@ enum Backend {
     static let dir: String = {
         if let r = Bundle.main.resourceURL?.appendingPathComponent("backend").path,
            FileManager.default.fileExists(atPath: r) { return r }
-        return NSString(string: "~/dev/leader/src").expandingTildeInPath
+        return NSString(string: "~/dev/leader.wt/embedded-app/src").expandingTildeInPath
     }()
     static let py = "/usr/bin/python3"
     static func run(_ args: [String]) -> Data {
@@ -92,25 +124,33 @@ enum Backend {
     static func scan() -> [Session] {
         (try? JSONDecoder().decode([Session].self, from: run(["\(dir)/scan.py", "--json"]))) ?? []
     }
+    static func scanCodex() -> [CodexSession] {
+        (try? JSONDecoder().decode([CodexSession].self, from: run(["\(dir)/codex-scan.py", "--json"]))) ?? []
+    }
+    static func scanKimi() -> [KimiSession] {
+        (try? JSONDecoder().decode([KimiSession].self, from: run(["\(dir)/kimi-scan.py", "--json"]))) ?? []
+    }
+    // Claude-only write scripts (they write ~/.claude/leader/*.json). Codex/Kimi
+    // overrides live in JsonOverrideStore instead — see UnifiedSession.swift.
     @discardableResult
-    static func open(_ s: Session) -> Bool {
-        let d = run(["\(dir)/launch.py", s.full_sid, s.resume_cwd ?? s.cwd ?? ""])
+    static func open(sid: String, cwd: String) -> Bool {
+        let d = run(["\(dir)/launch.py", sid, cwd])
         let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
         return (o?["ok"] as? Bool) ?? false
     }
-    static func setArchived(_ s: Session, _ on: Bool) {
-        _ = run(["\(dir)/archive.py", on ? "add" : "remove", s.full_sid])
+    static func setArchived(sid: String, on: Bool) {
+        _ = run(["\(dir)/archive.py", on ? "add" : "remove", sid])
     }
-    static func setPinned(_ s: Session, _ on: Bool) {
-        _ = run(["\(dir)/pin.py", on ? "add" : "remove", s.full_sid])
+    static func setPinned(sid: String, on: Bool) {
+        _ = run(["\(dir)/pin.py", on ? "add" : "remove", sid])
     }
-    static func setUnread(_ s: Session, _ on: Bool) {
-        _ = run(["\(dir)/unread.py", on ? "add" : "remove", s.full_sid])
+    static func setUnread(sid: String, on: Bool) {
+        _ = run(["\(dir)/unread.py", on ? "add" : "remove", sid])
     }
-    static func setNickname(_ s: Session, _ nick: String) {
+    static func setNickname(sid: String, nick: String) {
         let trimmed = nick.trimmingCharacters(in: .whitespacesAndNewlines)
-        _ = trimmed.isEmpty ? run(["\(dir)/name.py", "clear", s.full_sid])
-                            : run(["\(dir)/name.py", "set", s.full_sid, trimmed])
+        _ = trimmed.isEmpty ? run(["\(dir)/name.py", "clear", sid])
+                            : run(["\(dir)/name.py", "set", sid, trimmed])
     }
     static func newSession(_ cwd: String) {
         _ = run(["\(dir)/launch.py", "new", cwd])

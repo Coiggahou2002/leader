@@ -20,6 +20,10 @@ enum Conf {
     }
     static var proxy: String { (dict["proxy"] as? String) ?? "" }
     static var claudeBin: String { (dict["claude_bin"] as? String) ?? "" }
+    // Kept separate from claude_bin: users often install the different CLIs through
+    // different channels, and an empty value still lets `command -v <cli>` win.
+    static var codexBin: String { (dict["codex_bin"] as? String) ?? "" }
+    static var kimiBin: String { (dict["kimi_bin"] as? String) ?? "" }
     static var newCwd: String { (dict["new_session_cwd"] as? String) ?? "~" }
     // Post a macOS system notification when a session finishes a turn while you
     // weren't watching it. On by default.
@@ -100,8 +104,10 @@ func proxyEnvEntries() -> [String] {
     return ["http_proxy=http://\(p)", "https_proxy=http://\(p)", "all_proxy=socks5://\(p)"]
 }
 
-// CRITICAL: a `claude` launched with CLAUDE_CODE_*/CODEX_COMPANION_* in its env
-// runs as a NESTED child session and does NOT persist its transcript. Strip them.
+// CRITICAL: a `claude` launched with CLAUDE_CODE_*/CODEX_COMPANION_*/KIMI_CODE_*
+// in its env runs as a NESTED child session and does NOT persist its transcript.
+// Strip them. Kimi has not been observed to use these markers yet, but filtering
+// the prefix is harmless and keeps the policy consistent across providers.
 let POISON: [String] = [
     "CLAUDECODE", "CLAUDE_PLUGIN_DATA", "CLAUDE_EFFORT",
     "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH",
@@ -110,15 +116,19 @@ let POISON: [String] = [
 func termCleanEnv() -> [String] {
     var out: [String] = []
     for (k, v) in ProcessInfo.processInfo.environment {
-        if POISON.contains(k) || k.hasPrefix("CLAUDE_CODE") || k.hasPrefix("CODEX_COMPANION") { continue }
+        if POISON.contains(k) || k.hasPrefix("CLAUDE_CODE") || k.hasPrefix("CODEX_COMPANION") || k.hasPrefix("KIMI_CODE") { continue }
+        // Color env is REPLACED, never inherited (see below).
+        if k == "TERM" || k == "COLORTERM" || k == "NO_COLOR" || k == "NODE_DISABLE_COLORS" { continue }
         out.append("\(k)=\(v)")
     }
-    if !out.contains(where: { $0.hasPrefix("TERM=") }) { out.append("TERM=xterm-256color") }
-    // SwiftTerm renders 24-bit color; advertise it so programs (e.g. Claude Code's
-    // diff view) use vivid truecolor backgrounds instead of muted 256-color fallbacks.
-    // Launched from Raycast/Dock, the app inherits no shell env, so COLORTERM would
-    // otherwise be absent.
-    if !out.contains(where: { $0.hasPrefix("COLORTERM=") }) { out.append("COLORTERM=truecolor") }
+    // Leader is often launched from inside a TUI shell (`open` from a kimi/claude
+    // session), and `open` DOES propagate the caller's env — e.g. this repo's own
+    // debugging session exports NO_COLOR=1 + TERM=dumb, which made every embedded
+    // TUI render monochrome (Node CLIs honor NO_COLOR; anything honors TERM=dumb).
+    // Embedded terminals are Leader-owned ptys that DO render 24-bit color, so
+    // pin the canonical values instead of trusting the launch env.
+    out.append("TERM=xterm-256color")
+    out.append("COLORTERM=truecolor")   // SwiftTerm renders 24-bit; advertise it
     out.append("PATH=\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
     return out
 }
@@ -148,6 +158,30 @@ func resumeCommand(sid: String) -> String {
     let fallback = Conf.claudeBin.isEmpty ? "$HOME/.local/bin/claude" : Conf.claudeBin
     return "\(unset); \(proxyExport()); \(fullRepaintExport); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
          + "\"$CLAUDE\" --dangerously-skip-permissions\(hookSettingsArg()) --resume \(sid); exec /bin/zsh -i"
+}
+
+// Codex is deliberately launched with its normal approval and sandbox defaults.
+// Leader is a terminal host here, not a policy override: unlike the legacy Claude
+// path, it must not silently opt a Codex session into danger-full-access behavior.
+func codexResumeCommand(sid: String) -> String {
+    let fallback = Conf.codexBin.isEmpty ? "$HOME/.local/bin/codex" : Conf.codexBin
+    return "\(proxyExport()); CODEX=\"$(command -v codex || echo \(fallback))\"; "
+         + "\"$CODEX\" resume \(sid); exec /bin/zsh -i"
+}
+// Kimi is launched with its normal approval and sandbox defaults, just like Codex.
+// Kimi uses `-S <id>` (or `--session <id>`) to resume a saved session.
+func kimiResumeCommand(sid: String) -> String {
+    let fallback = Conf.kimiBin.isEmpty ? "$HOME/.kimi-code/bin/kimi" : Conf.kimiBin
+    return "\(proxyExport()); KIMI=\"$(command -v kimi || echo \(fallback))\"; "
+         + "\"$KIMI\" -S \(sid); exec /bin/zsh -i"
+}
+// New Kimi session: bare `kimi`. Unlike claude's --session-id, Kimi mints its own
+// session id, so Leader tracks the embed under a synthetic sid (newKimiSession)
+// until the next scan picks the real session up into the index.
+func kimiNewCommand() -> String {
+    let fallback = Conf.kimiBin.isEmpty ? "$HOME/.kimi-code/bin/kimi" : Conf.kimiBin
+    return "\(proxyExport()); KIMI=\"$(command -v kimi || echo \(fallback))\"; "
+         + "\"$KIMI\"; exec /bin/zsh -i"
 }
 // New session with a caller-chosen session id, so the app knows the sid up front
 // (no scan race). `claude --session-id <uuid>` starts a fresh conversation at that id.
@@ -459,19 +493,46 @@ final class TerminalManager: ObservableObject {
     }
     func cwd(forSid sid: String) -> String? { cwds[sid] }
 
-    func terminal(forSid sid: String, cwd: String) -> EmbeddedTerminalView {
-        if let v = views[sid] { return v }
+    // Claude predates provider namespacing and persists bare ids in restore.json.
+    // Keep that compatibility contract; newer providers are namespaced so sids
+    // from different CLIs never collide in the same TerminalManager maps.
+    private func key(_ sid: String, _ kind: TerminalKind) -> String {
+        switch kind {
+        case .claude: return sid
+        case .codex: return "codex:\(sid)"
+        case .kimi: return "kimi:\(sid)"
+        }
+    }
+    private func resumeCommandString(for kind: TerminalKind, sid: String) -> String {
+        switch kind {
+        case .claude: return resumeCommand(sid: sid)
+        case .codex: return codexResumeCommand(sid: sid)
+        case .kimi: return kimiResumeCommand(sid: sid)
+        }
+    }
+    func terminal(forSid sid: String, cwd: String, kind: TerminalKind = .claude) -> EmbeddedTerminalView {
+        let k = key(sid, kind)
+        if let v = views[k] { return v }
         let tv = EmbeddedTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         applyTermTheme(tv)
         delegate.owner = self
-        delegate.sidByView[ObjectIdentifier(tv)] = sid
+        delegate.sidByView[ObjectIdentifier(tv)] = k
         tv.processDelegate = delegate
-        tv.startProcess(executable: "/bin/zsh", args: ["-lc", resumeCommand(sid: sid)],
+        let command = resumeCommandString(for: kind, sid: sid)
+        tv.startProcess(executable: "/bin/zsh", args: ["-lc", command],
                         environment: termCleanEnv(), currentDirectory: expandTilde(cwd))
-        views[sid] = tv
-        cwds[sid] = cwd
-        markRunningDeferred(sid)
+        views[k] = tv
+        cwds[k] = cwd
+        markRunningDeferred(k)
         return tv
+    }
+    // Restore entry points: restore.json persists termKeys (claude bare, others
+    // namespaced), so the kind must be recovered from the key — otherwise a
+    // restored Codex/Kimi session would be spawned with the claude --resume
+    // command. Splits the key and forwards to terminal(forSid:cwd:kind:).
+    func terminal(forStoredKey storedKey: String, cwd: String) -> EmbeddedTerminalView {
+        let (kind, sid) = kindAndSid(fromTermKey: storedKey)
+        return terminal(forSid: sid, cwd: cwd, kind: kind)
     }
     // Start a brand-new session at a caller-chosen sid (no --resume). If a view for
     // that sid already exists it's returned as-is, so a later TerminalContainer
@@ -490,6 +551,26 @@ final class TerminalManager: ObservableObject {
         markRunningDeferred(sid)
         return tv
     }
+    // New Kimi session (bare `kimi` in cwd). Kimi has no --session-id equivalent,
+    // so the embed is keyed under a synthetic "new-<hex>" sid until the session
+    // lands in ~/.kimi-code/session_index.jsonl. Returns the synthetic sid.
+    @discardableResult
+    func newKimiSession(cwd: String) -> String {
+        let sid = "new-" + String(UUID().uuidString.lowercased().prefix(8))
+        let k = key(sid, .kimi)
+        if views[k] != nil { return sid }
+        let tv = EmbeddedTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        applyTermTheme(tv)
+        delegate.owner = self
+        delegate.sidByView[ObjectIdentifier(tv)] = k
+        tv.processDelegate = delegate
+        tv.startProcess(executable: "/bin/zsh", args: ["-lc", kimiNewCommand()],
+                        environment: termCleanEnv(), currentDirectory: expandTilde(cwd))
+        views[k] = tv
+        cwds[k] = cwd
+        markRunningDeferred(k)
+        return sid
+    }
     // terminal(forSid:)/newSession are called from TerminalContainer.updateNSView —
     // i.e. MID view update. Mutating @Published there is SwiftUI undefined behavior
     // ("Publishing changes from within view updates"): the transaction's other
@@ -502,8 +583,9 @@ final class TerminalManager: ObservableObject {
             self.running.insert(sid); self.exited.remove(sid)
         }
     }
-    func isOpen(_ sid: String) -> Bool { views[sid] != nil }
-    func close(_ sid: String) {
+    func isOpen(_ sid: String, kind: TerminalKind = .claude) -> Bool { views[key(sid, kind)] != nil }
+    func close(_ sid: String, kind: TerminalKind = .claude) {
+        let sid = key(sid, kind)
         // Clear badge state UNCONDITIONALLY first — even if the view is somehow
         // already gone, the sidebar badge (driven by running/exited) must clear.
         // Doing it before terminate() also means the async processTerminated ->
@@ -564,6 +646,7 @@ func terminalHostBGColor() -> NSColor {
 struct TerminalContainer: NSViewRepresentable {
     let sid: String
     let cwd: String
+    var kind: TerminalKind = .claude
     // NOT @ObservedObject: this container hosts exactly one session's terminal and
     // reparents on sid change. Observing TerminalManager made every running/exited
     // publish re-run updateNSView, and updateNSView calls the *mutating* factory
@@ -580,7 +663,7 @@ struct TerminalContainer: NSViewRepresentable {
     }
     func updateNSView(_ host: NSView, context: Context) {
         host.layer?.backgroundColor = terminalHostBGColor().cgColor   // keep gutter matching after a theme toggle
-        let term = mgr.terminal(forSid: sid, cwd: cwd)
+        let term = mgr.terminal(forSid: sid, cwd: cwd, kind: kind)
         for sub in host.subviews where sub !== term { sub.removeFromSuperview() }
         if term.superview !== host {
             term.removeFromSuperview()

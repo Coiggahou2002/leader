@@ -19,6 +19,8 @@ _DEFAULTS = {
     "kitty_socket": "unix:/tmp/leader-kitty.sock",
     # "" -> resolve via `command -v claude` at launch time
     "claude_bin": "",
+    # "" -> resolve via `command -v kimi` at launch time (Kimi Code CLI)
+    "kimi_bin": "",
     # "" -> no proxy; or "host:port" (http for http/https, socks5 for all_proxy)
     "proxy": "",
     # default folder for the "+" new-session button
@@ -62,6 +64,10 @@ def proxy_cmd() -> str:
 def claude_fallback() -> str:
     cb = (_C.get("claude_bin") or "").strip()
     return os.path.expanduser(cb) if cb else os.path.join(HOME, ".local/bin/claude")
+
+def kimi_fallback() -> str:
+    kb = (_C.get("kimi_bin") or "").strip()
+    return os.path.expanduser(kb) if kb else os.path.join(HOME, ".kimi-code/bin/kimi")
 
 def new_session_cwd() -> str:
     return os.path.expanduser(_C.get("new_session_cwd") or "~")

@@ -3,6 +3,8 @@
   "new_session_cwd": "~",
   "worktree_repos": [],
   "claude_bin": "",
+  "codex_bin": "",
+  "kimi_bin": "",
   "kitty_bin": "/Applications/kitty.app/Contents/MacOS/kitty",
   "kitty_socket": "unix:/tmp/leader-kitty.sock",
   "data_dir": "~/.claude/leader"

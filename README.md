@@ -2,7 +2,7 @@
 
 # ✈️ Leader
 
-**A native macOS cockpit for flying many Claude Code sessions at once — without the terminal-window pile.**
+**A native macOS cockpit for flying Claude Code, Codex, and Kimi Code CLI sessions — without the terminal-window pile.**
 
 ![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-blue)
 ![Swift](https://img.shields.io/badge/Swift-SwiftUI%20%2B%20SwiftTerm-orange)
@@ -19,7 +19,7 @@
 
 ## Why
 
-If you run Claude Code seriously, you end up with **a dozen sessions across
+If you run Claude Code or Codex seriously, you end up with **a dozen sessions across
 folders, git worktrees, and repos** — and two problems:
 
 1. **You lose track.** Which sessions are still reasoning? Which finished and
@@ -85,6 +85,8 @@ switching.
 - **macOS 14+** (Apple Silicon or Intel — you build it locally)
 - **Xcode Command Line Tools** — `xcode-select --install`
 - **Claude Code** — `claude` on your `PATH`
+- **Codex CLI** — `codex` on your `PATH` (only required for the Codex tab)
+- **Kimi Code CLI** — `kimi` on your `PATH` (only required for the Kimi tab)
 - Optional: [kitty](https://sw.kovidgoyal.net/kitty/) (`brew install --cask kitty`)
   — only the "open in kitty window" escape hatch needs it
 - Optional: `brew install --cask font-jetbrains-mono`
@@ -130,6 +132,8 @@ Everything has a sane default; override any key in `~/.config/leader/config.json
   "new_session_cwd": "~/dev/myrepo",  // folder the "+" button opens a new session in (default ~)
   "worktree_repos": ["~/dev/myrepo"], // git repos to show ahead/dirty + offer agent-worktree cleanup
   "claude_bin": "",                    // "" = resolve via `command -v claude`
+  "codex_bin": "",                     // "" = resolve via `command -v codex`
+  "kimi_bin": "",                      // "" = resolve via `command -v kimi`
   "kitty_bin": "/Applications/kitty.app/Contents/MacOS/kitty",
   "data_dir": "~/.claude/leader"       // where Leader stores pinned/archived/unread/nicknames
 }
@@ -142,6 +146,7 @@ proxy are also adjustable in-app via **Settings**.
 
 ```
 Leader.app (SwiftUI)
+ ├─ Provider root          switch between separate Claude / Codex / Kimi fleets
  ├─ LeaderApp.swift        sidebar, buckets, search, shimmer/breathing status
  ├─ EmbeddedTerminal.swift SwiftTerm views + per-session process lifecycle
  ├─ QuakeTerminal.swift    double-tap-Ctrl scratch terminal
@@ -150,12 +155,24 @@ Leader.app (SwiftUI)
      ├─ launch.py          kitty escape hatch (remote control, exact-window focus)
      ├─ archive.py / pin.py / unread.py / name.py   per-session flags & nicknames
      ├─ leader-hook.py     turn-lifecycle events → live "reasoning/done" status
-     └─ config.py          defaults + ~/.config/leader/config.json
+     ├─ config.py          defaults + ~/.config/leader/config.json
+     ├─ codex-scan.py      read ~/.codex session index + metadata (read-only)
+     └─ kimi-scan.py       read ~/.kimi-code session index + metadata (read-only)
 ```
 
-- **Your data is safe.** Leader treats `~/.claude/projects/*` as **read-only**
-  and keeps its own small state files under `~/.claude/leader`. Conversation
-  transcripts are never modified.
+- **Your data is safe.** Leader treats `~/.claude/projects/*`, Codex's
+  `~/.codex/{session_index.jsonl,sessions/*}`, and Kimi's
+  `~/.kimi-code/{session_index.jsonl,sessions/*}` as **read-only**. It keeps its
+  Claude-specific state files under `~/.claude/leader`; conversation transcripts
+  are never modified.
+- **Codex is intentionally narrow in this first release:** its tab lists local
+  saved sessions and opens `codex resume <session-id>` in the embedded terminal.
+  It does not infer lifecycle state or reuse Claude hooks, and preserves Codex's
+  normal approval and sandbox policy.
+- **Kimi is intentionally narrow in this first release:** its tab lists local
+  saved sessions and opens `kimi -S <session-id>` in the embedded terminal.
+  It does not infer lifecycle state or reuse Claude hooks, and preserves Kimi's
+  normal approval and sandbox policy.
 - **Live status** comes from Claude Code hooks: Leader registers
   `leader-hook.py` on `UserPromptSubmit` / `Stop` / `SessionEnd` (merged via
   `--settings`, without replacing your own hooks) and watches the event

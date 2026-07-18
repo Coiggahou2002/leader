@@ -6,7 +6,7 @@ import UserNotifications
 
 // MARK: - 重命名面板(sheet:macOS 上比 alert+TextField 可靠得多)
 struct RenameSheet: View {
-    let session: Session
+    let originalTitle: String   // shown as the "原标题:…" hint above the field
     @Binding var text: String
     let onSave: (String) -> Void
     let onCancel: () -> Void
@@ -14,7 +14,7 @@ struct RenameSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("重命名会话").font(.headline)
-            Text("原标题:\(session.title ?? session.last_prompt ?? "(无)")")
+            Text("原标题:\(originalTitle)")
                 .font(.caption).foregroundStyle(.secondary).lineLimit(2)
             TextField("昵称(留空恢复原标题)", text: $text)
                 .textFieldStyle(.roundedBorder).focused($focused)

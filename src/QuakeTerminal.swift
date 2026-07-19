@@ -54,6 +54,10 @@ final class QuakeTerminal: NSObject {
     // old shell so the next show() spawns a fresh one in the new directory.
     var currentCwd: String = NSHomeDirectory()
     private var shellCwd: String?
+    // The active session's provider — the scratch shell applies that provider's
+    // proxy setting (e.g. a kimi session's scratch shell goes direct when kimi's
+    // proxy is "off"). nil = no session active → global proxy.
+    var currentKind: TerminalKind?
 
     // MARK: hotkey (double-tap Control)
     // Local monitor: fires only while Leader is the active app, which is exactly
@@ -222,14 +226,17 @@ final class QuakeTerminal: NSObject {
         return p
     }
 
-    // If a proxy is configured, it wins: drop any inherited proxy vars and inject
-    // ours. If none is configured, keep whatever the app inherited (shell launch).
+    // Proxy handling follows the ACTIVE SESSION's provider setting: a custom or
+    // global proxy strips inherited vars and injects ours; "off" strips and
+    // injects nothing (genuinely direct); "inherit" with no global proxy keeps
+    // whatever the app inherited (shell launch).
     private func quakeShellEnv() -> [String] {
         var env = termCleanEnv()
-        let extra = proxyEnvEntries()
-        guard !extra.isEmpty else { return env }
+        let setting = currentKind.map { Conf.proxySetting(for: $0) } ?? .inherit
         let keys = ["http_proxy=", "https_proxy=", "all_proxy=",
                     "HTTP_PROXY=", "HTTPS_PROXY=", "ALL_PROXY="]
+        if case .inherit = setting, Conf.proxy.isEmpty { return env }   // keep inherited
+        let extra = proxyEnvEntries(setting)
         env.removeAll { e in keys.contains { e.hasPrefix($0) } }
         return env + extra
     }

@@ -48,6 +48,20 @@ the bundle by `build.sh`) and are loaded ONCE, pre-downsampled to 108 px with
 high-quality interpolation (`ProviderLogos`) — drawing the 1000 px sources at
 15–28 pt aliases. Selection uses `Color.primary.opacity` instead of accentColor.
 
+## Proxy (per-provider)
+
+`~/.config/leader/config.json` has a global `proxy` ("host:port" or "") plus
+per-provider overrides `proxy_claude` / `proxy_codex` / `proxy_kimi`:
+`"inherit"` (default → global), `"off"` (genuine direct — the launch command
+actively UNSETS inherited proxy vars, so a proxied parent shell can't leak
+through), or a custom `"host:port"`. Settings → 代理 edits all four (global at
+top, one row per provider). Resolution lives in `Conf.proxySetting(for:)` +
+`proxyExport(for:)` (Swift, session/quake terminals) and `config.proxy_cmd()`
+(python, kitty path — Claude-only). The Quake scratch shell follows the ACTIVE
+session's provider via `QuakeTerminal.currentKind` (set in
+`SessionsView.updateQuakeCwd`). Changes apply to newly spawned terminals only —
+reopen the session.
+
 ## Codex fleet boundary
 
 `src/codex-scan.py` implements a read-only integration: enumerate

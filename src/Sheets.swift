@@ -124,6 +124,31 @@ struct SettingsSheet: View {
     @State private var cursorStyle: String
     @State private var metal: Bool
     @State private var notify: Bool
+    // Per-provider proxy overrides (跟随全局 / 不使用代理 / 自定义 host:port).
+    @State private var claudeMode: ProxyMode
+    @State private var claudeAddr: String
+    @State private var codexMode: ProxyMode
+    @State private var codexAddr: String
+    @State private var kimiMode: ProxyMode
+    @State private var kimiAddr: String
+
+    enum ProxyMode: String, CaseIterable, Identifiable {
+        case inherit, off, custom
+        var id: Self { self }
+        var label: String {
+            switch self { case .inherit: "跟随全局"; case .off: "不使用代理"; case .custom: "自定义" }
+        }
+        var configValue: String {
+            switch self { case .inherit: "inherit"; case .off: "off"; case .custom: "" }
+        }
+    }
+    private static func modeAndAddr(_ s: Conf.ProxySetting) -> (ProxyMode, String) {
+        switch s {
+        case .off: return (.off, "")
+        case .inherit: return (.inherit, "")
+        case .custom(let a): return (.custom, a)
+        }
+    }
     // Display name -> SwiftTerm CursorStyle raw name (what CursorStyle.from parses).
     private static let cursorStyles: [(label: String, value: String)] = [
         ("竖线", "steadyBar"), ("竖线·闪烁", "blinkBar"),
@@ -141,6 +166,12 @@ struct SettingsSheet: View {
         _cursorStyle = State(initialValue: Conf.termCursorStyle)
         _metal = State(initialValue: Conf.termMetal)
         _notify = State(initialValue: Conf.notify)
+        let (cm, ca) = Self.modeAndAddr(Conf.proxySetting(for: .claude))
+        _claudeMode = State(initialValue: cm); _claudeAddr = State(initialValue: ca)
+        let (xm, xa) = Self.modeAndAddr(Conf.proxySetting(for: .codex))
+        _codexMode = State(initialValue: xm); _codexAddr = State(initialValue: xa)
+        let (km, ka) = Self.modeAndAddr(Conf.proxySetting(for: .kimi))
+        _kimiMode = State(initialValue: km); _kimiAddr = State(initialValue: ka)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -217,6 +248,12 @@ struct SettingsSheet: View {
                      + "http_proxy / https_proxy / all_proxy。从 Raycast/Dock 启动 App "
                      + "时没有 shell 环境,必须在这里显式设置代理,否则 claude 连不上会让你登录。")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                // Per-provider overrides: e.g. Kimi 直连(不使用代理),Claude/Codex 跟随全局。
+                proxyRow("Claude", mode: $claudeMode, addr: $claudeAddr)
+                proxyRow("Codex", mode: $codexMode, addr: $codexAddr)
+                proxyRow("Kimi", mode: $kimiMode, addr: $kimiAddr)
+                Text("按 Provider 覆盖上面的全局代理:「不使用代理」会同时清掉从 shell 继承的代理变量(真直连);「自定义」用单独的 host:port。Quake 临时终端跟随当前会话的 Provider。")
+                    .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
                 Text("代理改动对已打开的终端不生效,重开该会话即可。")
                     .font(.caption2).foregroundStyle(.tertiary)
             }
@@ -227,6 +264,12 @@ struct SettingsSheet: View {
                 Button("保存") {
                     let val = enabled ? addr.trimmingCharacters(in: .whitespaces) : ""
                     Conf.save(["proxy": val,
+                               "proxy_claude": claudeMode == .custom
+                                   ? claudeAddr.trimmingCharacters(in: .whitespaces) : claudeMode.configValue,
+                               "proxy_codex": codexMode == .custom
+                                   ? codexAddr.trimmingCharacters(in: .whitespaces) : codexMode.configValue,
+                               "proxy_kimi": kimiMode == .custom
+                                   ? kimiAddr.trimmingCharacters(in: .whitespaces) : kimiMode.configValue,
                                "term_font": font,
                                "term_font_size": Double(fontSize),
                                "line_height": Double(lineHeight),
@@ -245,5 +288,20 @@ struct SettingsSheet: View {
             }
         }
         .padding(18).frame(width: 400)
+    }
+
+    // One per-provider proxy override row: mode picker + conditional custom field.
+    private func proxyRow(_ label: String, mode: Binding<ProxyMode>, addr: Binding<String>) -> some View {
+        HStack(spacing: 6) {
+            Text(label).frame(width: 48, alignment: .leading)
+            Picker("", selection: mode) {
+                ForEach(ProxyMode.allCases) { Text($0.label).tag($0) }
+            }
+            .labelsHidden().fixedSize()
+            if mode.wrappedValue == .custom {
+                TextField("host:port", text: addr)
+                    .textFieldStyle(.roundedBorder)
+            }
+        }
     }
 }

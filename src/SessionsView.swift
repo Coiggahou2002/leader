@@ -531,11 +531,12 @@ struct SessionsView: View {
         store.markTerminalClosed(key)     // drop from 活跃 immediately, then reconcile
     }
 
-    // The scratch (quake) terminal opens in the active session's working dir;
-    // keep it pointed there, for ANY provider.
+    // The scratch (quake) terminal opens in the active session's working dir and
+    // uses that provider's proxy setting; keep both pointed at the active session.
     private func updateQuakeCwd() {
         if let key = activeSID {
             let (kind, sid) = kindAndSid(fromTermKey: key)
+            QuakeTerminal.shared.currentKind = kind
             if let s = store.sessions.first(where: { $0.kind == kind && $0.full_sid == sid }) {
                 QuakeTerminal.shared.currentCwd = s.cwd ?? s.resume_cwd ?? NSHomeDirectory()
                 return

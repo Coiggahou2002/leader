@@ -19,6 +19,18 @@ enum Conf {
         return [:]
     }
     static var proxy: String { (dict["proxy"] as? String) ?? "" }
+    // Per-provider proxy override, stored as proxy_<kind>: "inherit" (default →
+    // use the global proxy), "off" (genuinely none — inherited env is stripped),
+    // or "host:port" (custom). e.g. Kimi talks to a domestic endpoint and wants
+    // "off" while Claude/Codex inherit the global proxy.
+    static func proxySetting(for kind: TerminalKind) -> ProxySetting {
+        switch ((dict["proxy_\(kind.rawValue)"] as? String) ?? "inherit").trimmingCharacters(in: .whitespaces) {
+        case "off": return .off
+        case "", "inherit": return .inherit
+        case let v: return .custom(v)
+        }
+    }
+    enum ProxySetting: Equatable { case off, inherit, custom(String) }
     static var claudeBin: String { (dict["claude_bin"] as? String) ?? "" }
     // Kept separate from claude_bin: users often install the different CLIs through
     // different channels, and an empty value still lets `command -v <cli>` win.
@@ -94,14 +106,33 @@ enum Conf {
     }
 }
 
-// Proxy env entries (or []) shared by any plain shell we spawn (e.g. the quake
-// terminal). claude terminals inject the same vars via proxyExport() in their
-// launch command; this is the array-form for processes started without a shell
-// snippet.
-func proxyEnvEntries() -> [String] {
-    let p = Conf.proxy
-    guard !p.isEmpty else { return [] }
-    return ["http_proxy=http://\(p)", "https_proxy=http://\(p)", "all_proxy=socks5://\(p)"]
+// Proxy env entries (or []) for plain shells we spawn (e.g. the quake terminal).
+// `setting` nil = the global proxy, preserving inherited env when unset.
+func proxyEnvEntries(_ setting: Conf.ProxySetting?) -> [String] {
+    let s = setting ?? .inherit
+    switch s {
+    case .off: return []          // caller strips inherited vars too
+    case .custom(let p): return ["http_proxy=http://\(p)", "https_proxy=http://\(p)", "all_proxy=socks5://\(p)"]
+    case .inherit:
+        let p = Conf.proxy
+        guard !p.isEmpty else { return [] }
+        return ["http_proxy=http://\(p)", "https_proxy=http://\(p)", "all_proxy=socks5://\(p)"]
+    }
+}
+// Shell-snippet form for the resume/new-session command strings. "off" actively
+// UNSETS inherited proxy vars so the CLI genuinely goes direct; "inherit" with
+// no global proxy is a no-op (inherited env passes through, same as before).
+func proxyExport(for kind: TerminalKind) -> String {
+    switch Conf.proxySetting(for: kind) {
+    case .off:
+        return "unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY"
+    case .custom(let p):
+        return "export http_proxy=http://\(p) https_proxy=http://\(p) all_proxy=socks5://\(p)"
+    case .inherit:
+        let p = Conf.proxy
+        guard !p.isEmpty else { return ":" }
+        return "export http_proxy=http://\(p) https_proxy=http://\(p) all_proxy=socks5://\(p)"
+    }
 }
 
 // CRITICAL: a `claude` launched with CLAUDE_CODE_*/CODEX_COMPANION_*/KIMI_CODE_*
@@ -132,11 +163,6 @@ func termCleanEnv() -> [String] {
     out.append("PATH=\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
     return out
 }
-func proxyExport() -> String {
-    let p = Conf.proxy
-    guard !p.isEmpty else { return ":" }
-    return "export http_proxy=http://\(p) https_proxy=http://\(p) all_proxy=socks5://\(p)"
-}
 // Force claude's full-screen TUI to FULL-REPAINT instead of its cursor-relative
 // differential redraw. The diff renderer rewinds by logical-line count, but a
 // non-grapheme-aware emulator (SwiftTerm) wraps CJK / ZWJ-emoji / exact-width
@@ -156,7 +182,7 @@ func hookSettingsArg() -> String {
 func resumeCommand(sid: String) -> String {
     let unset = "unset " + POISON.joined(separator: " ")
     let fallback = Conf.claudeBin.isEmpty ? "$HOME/.local/bin/claude" : Conf.claudeBin
-    return "\(unset); \(proxyExport()); \(fullRepaintExport); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
+    return "\(unset); \(proxyExport(for: .claude)); \(fullRepaintExport); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
          + "\"$CLAUDE\" --dangerously-skip-permissions\(hookSettingsArg()) --resume \(sid); exec /bin/zsh -i"
 }
 
@@ -165,14 +191,14 @@ func resumeCommand(sid: String) -> String {
 // path, it must not silently opt a Codex session into danger-full-access behavior.
 func codexResumeCommand(sid: String) -> String {
     let fallback = Conf.codexBin.isEmpty ? "$HOME/.local/bin/codex" : Conf.codexBin
-    return "\(proxyExport()); CODEX=\"$(command -v codex || echo \(fallback))\"; "
+    return "\(proxyExport(for: .codex)); CODEX=\"$(command -v codex || echo \(fallback))\"; "
          + "\"$CODEX\" resume \(sid); exec /bin/zsh -i"
 }
 // Kimi is launched with its normal approval and sandbox defaults, just like Codex.
 // Kimi uses `-S <id>` (or `--session <id>`) to resume a saved session.
 func kimiResumeCommand(sid: String) -> String {
     let fallback = Conf.kimiBin.isEmpty ? "$HOME/.kimi-code/bin/kimi" : Conf.kimiBin
-    return "\(proxyExport()); KIMI=\"$(command -v kimi || echo \(fallback))\"; "
+    return "\(proxyExport(for: .kimi)); KIMI=\"$(command -v kimi || echo \(fallback))\"; "
          + "\"$KIMI\" -S \(sid); exec /bin/zsh -i"
 }
 // New Kimi session: bare `kimi`. Unlike claude's --session-id, Kimi mints its own
@@ -180,7 +206,7 @@ func kimiResumeCommand(sid: String) -> String {
 // until the next scan picks the real session up into the index.
 func kimiNewCommand() -> String {
     let fallback = Conf.kimiBin.isEmpty ? "$HOME/.kimi-code/bin/kimi" : Conf.kimiBin
-    return "\(proxyExport()); KIMI=\"$(command -v kimi || echo \(fallback))\"; "
+    return "\(proxyExport(for: .kimi)); KIMI=\"$(command -v kimi || echo \(fallback))\"; "
          + "\"$KIMI\"; exec /bin/zsh -i"
 }
 // New session with a caller-chosen session id, so the app knows the sid up front
@@ -188,7 +214,7 @@ func kimiNewCommand() -> String {
 func newSessionCommand(sid: String) -> String {
     let unset = "unset " + POISON.joined(separator: " ")
     let fallback = Conf.claudeBin.isEmpty ? "$HOME/.local/bin/claude" : Conf.claudeBin
-    return "\(unset); \(proxyExport()); \(fullRepaintExport); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
+    return "\(unset); \(proxyExport(for: .claude)); \(fullRepaintExport); CLAUDE=\"$(command -v claude || echo \(fallback))\"; "
          + "\"$CLAUDE\" --dangerously-skip-permissions\(hookSettingsArg()) --session-id \(sid); exec /bin/zsh -i"
 }
 func expandTilde(_ p: String) -> String { (p as NSString).expandingTildeInPath }

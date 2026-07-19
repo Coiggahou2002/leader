@@ -54,9 +54,16 @@ def projects_dir() -> str:
 KITTY = os.path.expanduser(_C["kitty_bin"])
 SOCK = _C["kitty_socket"]
 
-def proxy_cmd() -> str:
-    """Shell snippet to export proxy vars, or ':' (no-op) when disabled."""
-    p = (_C.get("proxy") or "").strip()
+def proxy_cmd(provider: str = "claude") -> str:
+    """Shell snippet to export proxy vars for a provider. proxy_<provider> in
+    config.json: "off" actively unsets inherited vars (genuine direct), missing/
+    "inherit" falls back to the global `proxy` (':' = no-op), anything else is a
+    custom host:port. Only Claude terminals round through launch.py, so callers
+    use the default."""
+    v = (_C.get(f"proxy_{provider}") or "inherit").strip()
+    if v == "off":
+        return "unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY"
+    p = (_C.get("proxy") or "").strip() if v in ("", "inherit") else v
     if not p:
         return ":"
     return f"export https_proxy=http://{p} http_proxy=http://{p} all_proxy=socks5://{p}"

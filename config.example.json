@@ -1,5 +1,8 @@
 {
   "proxy": "",
+  "proxy_claude": "inherit",
+  "proxy_codex": "inherit",
+  "proxy_kimi": "off",
   "new_session_cwd": "~",
   "worktree_repos": [],
   "claude_bin": "",

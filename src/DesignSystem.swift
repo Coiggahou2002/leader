@@ -47,6 +47,18 @@ struct VisualEffect: NSViewRepresentable {
     func updateNSView(_ v: NSVisualEffectView, context: Context) {}
 }
 
+// Darkening layer over the frosted backdrop (rail / sidebar / terminal margin).
+// NSVisualEffectView's .sidebar material follows the WALLPAPER, which can read
+// too light; a scheme-aware black tint pins the app to a consistent darker tone.
+// Layer order at each site: content → BackdropTint → VisualEffect.
+struct BackdropTint: View {
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        (scheme == .dark ? Color.black.opacity(0.28) : Color.black.opacity(0.06))
+            .ignoresSafeArea()
+    }
+}
+
 // Low-contrast overlay scrollbar knob (Codex-like). The system .light knob on a
 // dark UI is glaringly bright; draw a subtle rounded knob and no track instead.
 final class SubtleScroller: NSScroller {

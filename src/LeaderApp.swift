@@ -65,6 +65,7 @@ struct ProviderRootView: View {
         }
         .frame(width: 44)
         .padding(.horizontal, 4)
+        .background(BackdropTint())                     // darken the frosted backdrop
         .background(VisualEffect().ignoresSafeArea())   // frosted like the sidebar, not opaque
     }
 }

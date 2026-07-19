@@ -389,16 +389,7 @@ struct SessionsView: View {
     }
 
     var body: some View {
-        HSplitView {
-            sidebar
-                .frame(minWidth: 280, idealWidth: DS.panelWidth, maxWidth: 460,
-                       maxHeight: .infinity)
-            terminalArea
-                .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
-                .background(TerminalAreaProbe())   // anchors the scratch terminal over this pane
-                .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
-        }
-        .ignoresSafeArea()                          // let both panes fill under the transparent titlebar
+        mainLayout
         .overlay { openPathPanel }
         .overlay { commandPalette }
         .frame(minWidth: 820, minHeight: 480)
@@ -547,6 +538,28 @@ struct SessionsView: View {
         }
     }
 
+    // HStack, not HSplitView: the card-style terminal area must not show the
+    // split divider line (which can't be hidden). Sidebar is fixed at
+    // DS.panelWidth; the window min size still guarantees the terminal fits.
+    // Extracted from body so the type-checker doesn't choke on one giant chain.
+    private var mainLayout: some View {
+        HStack(spacing: 0) {
+            sidebar
+                .frame(width: DS.panelWidth)
+                .frame(maxHeight: .infinity)
+            terminalArea
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Card margins are measured from the window's real top edge, not
+                // the titlebar safe area — otherwise the top gap dwarfs the rest.
+                .ignoresSafeArea(.container, edges: .top)
+                // Same frosted material as the rail+sidebar, so everything OUTSIDE
+                // the terminal card reads as one uniform backdrop.
+                .background(BackdropTint())
+                .background(VisualEffect().ignoresSafeArea())
+        }
+        .ignoresSafeArea()                          // let both panes fill under the transparent titlebar
+    }
+
     private var sidebar: some View {
         VStack(spacing: 0) {
             trafficInset                                 // 红绿灯落在这块留白里
@@ -560,6 +573,7 @@ struct SessionsView: View {
             Divider().opacity(0.4)
             bottomBar
         }
+        .background(BackdropTint())                     // darken the frosted backdrop
         .background(VisualEffect().ignoresSafeArea())   // frosted translucent sidebar
         .background {                                   // hidden keyboard shortcuts
             ZStack {                                     // Cmd+F is handled by the app-wide key monitor
@@ -784,21 +798,39 @@ struct SessionsView: View {
 
     @ViewBuilder private var terminalArea: some View {
         if let info = activeEmbed {
-            VStack(spacing: 0) {
-                terminalHeader(embed: info)
-                TerminalContainer(sid: info.sid, cwd: info.cwd, kind: info.kind)
+            terminalCard {
+                VStack(spacing: 0) {
+                    terminalHeader(embed: info)
+                    TerminalContainer(sid: info.sid, cwd: info.cwd, kind: info.kind)
+                }
             }
         } else {
-            VStack(spacing: 10) {
-                Image(systemName: "terminal").font(.system(size: 40)).foregroundStyle(.tertiary)
-                Text(filter.map { "点击左侧会话,在此嵌入运行 \(providerLabel($0))" }
-                        ?? "点击左侧会话,在此嵌入运行(支持 Claude / Codex / Kimi)")
-                    .foregroundStyle(.secondary).font(.callout)
-                Text("再次点击切换 · 关掉单个会话可释放资源").foregroundStyle(.tertiary).font(.caption)
+            terminalCard {
+                VStack(spacing: 10) {
+                    Image(systemName: "terminal").font(.system(size: 40)).foregroundStyle(.tertiary)
+                    Text(filter.map { "点击左侧会话,在此嵌入运行 \(providerLabel($0))" }
+                            ?? "点击左侧会话,在此嵌入运行(支持 Claude / Codex / Kimi)")
+                        .foregroundStyle(.secondary).font(.callout)
+                    Text("再次点击切换 · 关掉单个会话可释放资源").foregroundStyle(.tertiary).font(.caption)
+                }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .windowBackgroundColor))
         }
+    }
+
+    // ZCode-style card: the whole terminal region is one rounded rect inset from
+    // the window's top/right/bottom edges (the left edge stays attached to the
+    // sidebar divider). Card bg = the terminal's own bg so header + terminal read
+    // as one surface; the margin strip shows the window background. The quake
+    // probe tracks the CARD (inset), not the pane.
+    private func terminalCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(terminalHostBGColor()))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08)))
+            .background(TerminalAreaProbe())   // anchors the scratch terminal over the card
+            .padding(10)                       // uniform breathing room on all four sides
     }
 
     // Thin bar above the embedded terminal: which session is running + a close
@@ -826,30 +858,16 @@ struct SessionsView: View {
             .help("杀掉嵌入的进程(列表项保留)")
         }
         .padding(.horizontal, 12).padding(.vertical, 7)
-        .background(.bar)
+        // Blends into the terminal card (no .bar strip); a hairline separates it
+        // from the terminal grid below.
+        .overlay(alignment: .bottom) { Color.primary.opacity(0.1).frame(height: 1) }
     }
 
-    // Top strip: reserves room for the window's traffic lights and shows the
-    // current scope's brand mark — the provider logo, or the app icon for All.
+    // Top strip: just reserves room for the window's floating traffic lights.
+    // (The provider/app logo that used to sit here was removed — the rail logos
+    // already carry the branding.)
     private var trafficInset: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Color.clear.frame(height: 26)        // room for the floating traffic lights
-            Group {
-                if let f = filter {
-                    if let logo = ProviderLogos.image(for: f) {
-                        Image(nsImage: logo).resizable().interpolation(.high)
-                            .scaledToFit().frame(height: 32)
-                    } else {
-                        Text(providerLabel(f)).font(.title3).bold()
-                    }
-                } else {
-                    Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high)
-                        .scaledToFit().frame(height: 32)
-                }
-            }
-            .padding(.leading, DS.gap + DS.rowPadH - 2)   // align with list content
-            .padding(.bottom, 16)
-        }
+        Color.clear.frame(height: 26)
     }
 
     // Utility strip pinned to the sidebar bottom.

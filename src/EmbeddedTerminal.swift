@@ -584,6 +584,20 @@ final class TerminalManager: ObservableObject {
         }
     }
     func isOpen(_ sid: String, kind: TerminalKind = .claude) -> Bool { views[key(sid, kind)] != nil }
+    // Move a live terminal to a new key WITHOUT touching its process. Used when a
+    // synthetic key (kimi "new-<hex>") is adopted by the real session id the
+    // scanner just picked up — the alternative (look the session up under its real
+    // sid later) would spawn a SECOND CLI process on the same session.
+    func rekey(from oldKey: String, to newKey: String) {
+        guard let v = views[oldKey] else { return }
+        views.removeValue(forKey: oldKey)
+        views[newKey] = v
+        if let c = cwds.removeValue(forKey: oldKey) { cwds[newKey] = c }
+        if running.remove(oldKey) != nil { running.insert(newKey) }
+        if exited.remove(oldKey) != nil { exited.insert(newKey) }
+        delegate.sidByView[ObjectIdentifier(v)] = newKey
+        if lastActiveSid == oldKey { lastActiveSid = newKey }
+    }
     func close(_ sid: String, kind: TerminalKind = .claude) {
         let sid = key(sid, kind)
         // Clear badge state UNCONDITIONALLY first — even if the view is somehow

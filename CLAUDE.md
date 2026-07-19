@@ -70,7 +70,14 @@ Codex has no `--session-id` equivalent, so ⌘⇧O quick-create is unavailable t
 
 ⌘⇧O creates a new Kimi session via `TerminalManager.newKimiSession`, keyed under
 a synthetic `new-<hex>` sid because Kimi has no `--session-id`; the real sid
-lands in the index on the next scan. Tab membership follows the same invariant
+lands in the index on the next scan. When it does, `SessionsView.reconcileAfterScan()`
+ADOPTS it: candidates must share the cwd, be fresh (< 3 min idle), and be unseen
+in earlier scans (tracked in `knownKimiSids`) — exactly one match means
+`TerminalManager.rekey(from:to:)` moves the LIVE terminal to the real sid (no
+respawn, so clicking the row never spawns a second CLI on the same session) and
+the row becomes selected. Zero or 2+ matches → stay unselected rather than adopt
+the wrong session. Claude needs none of this: its sid is minted up front via
+`claude --session-id`. Tab membership follows the same invariant
 as Claude: archived is exclusive; 活跃 = `TerminalManager.running` only.
 
 Do **not** route Kimi through `leader-hook.py`, Claude's JSONL scanner, or

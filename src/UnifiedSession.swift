@@ -11,7 +11,7 @@ import AppKit
 // idle_h/file). Anything richer (branch, alive, asks, errored, …) is Claude-only
 // and stays Optional/defaulted — UI that depends on it degrades per-capability
 // (see hasActivitySignals) instead of faking state for Codex/Kimi.
-struct AnySession: Identifiable {
+struct AnySession: Identifiable, Equatable {
     let kind: TerminalKind
     let full_sid: String
     let sid: String

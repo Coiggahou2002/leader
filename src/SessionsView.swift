@@ -61,6 +61,10 @@ struct SessionsView: View {
     // A just-created session: embedded immediately at a known (possibly synthetic)
     // sid, before the scanner picks it up into store.sessions.
     @State private var pendingNew: (sid: String, cwd: String, kind: TerminalKind)?
+    // Kimi sids seen in earlier scans — the "is this session NEW?" signal used to
+    // adopt a pendingNew kimi session once its real sid lands (see
+    // reconcileAfterScan). Seeded on appear, unioned after every scan.
+    @State private var knownKimiSids: Set<String> = []
     @FocusState private var focus: Focus?
     @AppStorage("leader.sortMode") private var sortMode: SortMode = .folder
     @Environment(\.colorScheme) private var scheme
@@ -400,8 +404,10 @@ struct SessionsView: View {
         .frame(minWidth: 820, minHeight: 480)
         .onAppear {
             store.start(); focus = .list; updateQuakeCwd()
+            reconcileAfterScan()   // seed knownKimiSids with whatever is already scanned
             restoreSessions()
         }
+        .onChange(of: store.sessions) { _, _ in reconcileAfterScan() }
         .onChange(of: activeSID) { _, key in
             updateQuakeCwd()
             let (kind, sid) = kindAndSid(fromTermKey: key ?? "")
@@ -449,6 +455,49 @@ struct SessionsView: View {
         } message: {
             Text("会杀掉「\(closeTarget?.name ?? "")」的嵌入进程(transcript 已保存,可重新打开)。Leader 不会退出。")
         }
+    }
+
+    // Runs after every scan merge. Two jobs:
+    // 1. Claude: pendingNew mints the real sid up front, so once the scan lands it
+    //    the stub is redundant — retire it (activeEmbed already prefers the row).
+    // 2. Kimi: pendingNew is a SYNTHETIC sid (no --session-id exists). When the
+    //    real session shows up in the scan, adopt it: re-key the live terminal to
+    //    the real sid (same process, no respawn) and select the row. Candidates
+    //    must be in the same cwd, fresh (updated < 3 min ago), and never seen in
+    //    an earlier scan — and there must be exactly ONE, or we stay unselected
+    //    rather than adopt the wrong session.
+    private func reconcileAfterScan() {
+        defer {
+            knownKimiSids.formUnion(store.sessions.filter { $0.kind == .kimi }.map(\.full_sid))
+        }
+        guard let p = pendingNew else { return }
+        if p.kind == .claude {
+            if store.sessions.contains(where: { $0.kind == .claude && $0.full_sid == p.sid }) {
+                pendingNew = nil
+            }
+            return
+        }
+        guard p.kind == .kimi else { return }
+        let fresh = store.sessions.filter { s in
+            s.kind == .kimi && !s.archived
+                && !knownKimiSids.contains(s.full_sid)
+                && s.idle_h < 3.0 / 60.0
+                && (sameDir(s.resume_cwd, p.cwd) || sameDir(s.cwd, p.cwd))
+        }
+        guard fresh.count == 1, let s = fresh.first else { return }
+        let syntheticKey = "kimi:\(p.sid)"
+        TerminalManager.shared.rekey(from: syntheticKey, to: s.termKey)
+        if activeSID == syntheticKey { activeSID = s.termKey }
+        pendingNew = nil
+        selectedID = s.id
+        store.markOpened(s)
+    }
+    private func sameDir(_ a: String?, _ b: String) -> Bool {
+        guard let a else { return false }
+        var x = expandTilde(a), y = expandTilde(b)
+        if x.hasSuffix("/") { x = String(x.dropLast()) }
+        if y.hasSuffix("/") { y = String(y.dropLast()) }
+        return x == y
     }
 
     // Reopen the sessions saved by the quit dialog (macOS-style "恢复会话").

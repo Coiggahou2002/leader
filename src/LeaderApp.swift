@@ -34,7 +34,10 @@ struct ProviderRootView: View {
     var body: some View {
         HStack(spacing: 0) {
             providerRail
-            Divider()
+            // Subtle separator instead of Divider: a plain Divider reads
+            // near-black against the frosted rail when a light wallpaper shows
+            // through; primary-at-low-alpha adapts to both scheme and backdrop.
+            Rectangle().fill(Color.primary.opacity(0.1)).frame(width: 1)
             // ONE view type for every rail entry — the filter is just a parameter,
             // so per-tab state (selection, embedded terminal) survives switching.
             SessionsView(filter: filter)

@@ -8,3 +8,7 @@ src/AppIcon.icns
 src/Leader.iconset/
 # local data / config never belongs in the repo
 config.json
+
+# local-only planning docs (not for PR)
+docs/blog-terminal-gaps-deep-dive.md
+docs/custom-frontend-plan.md

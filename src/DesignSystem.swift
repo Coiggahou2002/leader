@@ -59,6 +59,15 @@ struct BackdropTint: View {
     }
 }
 
+// Hairline between the provider rail and the sidebar (ProviderRootView). Opaque
+// neutral grey in light mode — an alpha-black line over the frosted backdrop
+// picks up its hue and reads muddy; alpha-white in dark mode (≈ primary 0.1).
+let railSeparatorColor = NSColor(name: nil) { app in
+    app.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        ? NSColor(calibratedWhite: 1, alpha: 0.1)
+        : NSColor(calibratedWhite: 0.85, alpha: 1)   // ~#d9d9d9
+}
+
 // Low-contrast overlay scrollbar knob (Codex-like). The system .light knob on a
 // dark UI is glaringly bright; draw a subtle rounded knob and no track instead.
 final class SubtleScroller: NSScroller {

@@ -36,8 +36,10 @@ struct ProviderRootView: View {
             providerRail
             // Subtle separator instead of Divider: a plain Divider reads
             // near-black against the frosted rail when a light wallpaper shows
-            // through; primary-at-low-alpha adapts to both scheme and backdrop.
-            Rectangle().fill(Color.primary.opacity(0.1)).frame(width: 1)
+            // through. Per-scheme, opaque in light: an alpha-black hairline picks
+            // up the frosted backdrop's hue and reads muddy; a neutral light grey
+            // stays crisp. Dark keeps the alpha-white hairline.
+            Rectangle().fill(Color(nsColor: railSeparatorColor)).frame(width: 1)
             // ONE view type for every rail entry — the filter is just a parameter,
             // so per-tab state (selection, embedded terminal) survives switching.
             SessionsView(filter: filter)

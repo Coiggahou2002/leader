@@ -128,6 +128,21 @@ patch BOTH renderers (CG `drawTerminalContents` + `MetalTerminalRenderer`'s two
   `EmbeddedTerminalView` is CG-only; Metal routes through `requestMetalDisplay`.
 - **Cursor**: `term_cursor_style` config key (default `steadyBar`), applied in
   `applyTermTheme` via `setCursorStyle`; DECSCUSR from apps still overrides.
+- **Light/dark follow**: `term_follow_appearance` (default on). `applyTermTheme`
+  picks the Kaku dark or light palette by `terminalIsDark(view)`; the card gutter
+  (`terminalHostBGColor(dark:)`) and `SessionsView.terminalCard` use the same
+  predicate so they never mismatch. On a system appearance flip,
+  `EmbeddedTerminalView.viewDidChangeEffectiveAppearance` re-themes the surface
+  AND pushes `CSI ?997;Ps n` (DEC 2031 color-scheme notification) to the child:
+  claude (injected `theme:auto` via `ensureLeaderHookSettings`'s --settings JSON;
+  "dark" when follow is off) and kimi (its tui.toml `theme="auto"` — verified
+  0.27.0 subscribes `CSI ?2031h` + queries `OSC 11;?` at startup) both re-theme
+  live without a restart; plain shells ignore the sequence. SwiftTerm answers
+  the OSC 11 bg query from the view's current colors, so the answer is correct
+  even right after a flip. `LEADER_FORCE_APPEARANCE=light|dark` pins an instance
+  (AppDelegate, willFinish) for LeaderDev verification without flipping the OS —
+  note a pinned appearance never CHANGES, so the live-flip push can only be
+  tested unpinned.
 - **Color env is pinned, not inherited.** `termCleanEnv()` strips `TERM`,
   `COLORTERM`, `NO_COLOR`, `NODE_DISABLE_COLORS` from the inherited env and
   always sets `TERM=xterm-256color` + `COLORTERM=truecolor`. Reason: launching

@@ -48,6 +48,13 @@ enum Conf {
     // Soft ANSI palette on by default: 16-color TUIs (claude-hud bars, ls, etc.)
     // otherwise render with SwiftTerm's harsh default xterm palette.
     static var softColors: Bool { (dict["soft_colors"] as? Bool) ?? true }
+    // Follow the system light/dark appearance: the terminal palette (Kaku
+    // dark ↔ light) tracks it, and a color-scheme notification (DEC 2031) is
+    // pushed to whatever runs inside — claude (theme:auto, injected via
+    // --settings) and kimi (tui.toml theme="auto") both subscribe to it and
+    // re-theme live without a restart. On by default. Off = always the dark
+    // (Kaku Dark) look, regardless of appearance.
+    static var followAppearance: Bool { (dict["term_follow_appearance"] as? Bool) ?? true }
     // Line-height multiplier (needs the patched SwiftTerm). 1.0 = tight/upstream.
     static var lineHeight: CGFloat {
         let v = (dict["line_height"] as? Double).map { CGFloat($0) } ?? 1.2
@@ -253,6 +260,36 @@ let defaultAnsiPalette: [SwiftTerm.Color] = [
     hexColor(0x0700fe), hexColor(0xe500e5), hexColor(0x00e5e5), hexColor(0xe5e5e5),
 ]
 
+// A light counterpart to kakuAnsiPalette (same hue family, darkened for contrast
+// on a near-white background). Used when soft colors are on AND the app is in a
+// light appearance (term_follow_appearance). Unlike the dark palette's slot-0
+// caveat above, here slot 0 ("black") is a dark slate, so a program painting an
+// ANSI-black *background* gets a dark block on light — the correct light-theme look.
+let kakuLightAnsiPalette: [SwiftTerm.Color] = [
+    hexColor(0x2a2a37), hexColor(0xc0453f), hexColor(0x1f8a5f), hexColor(0xb07d12),
+    hexColor(0x2f6fb0), hexColor(0x7c4dc4), hexColor(0x178a8a), hexColor(0x5a5a66),
+    hexColor(0x6d6d78), hexColor(0xd05a54), hexColor(0x22a06b), hexColor(0xc8912a),
+    hexColor(0x3f86c9), hexColor(0x8e6ad9), hexColor(0x1fa3a3), hexColor(0x2a2a37),
+]
+let kakuLightBG = 0xfbfbfa   // warm off-white, pairs with the light sidebar
+let kakuLightFG = 0x2a2a37   // dark slate (echoes Kaku Dark's #15141b hue family)
+
+// Whether the app is drawing in a dark appearance. Pass the terminal view so its
+// own effectiveAppearance wins (it falls back to NSApp's before it's in a window).
+// Drives the terminal palette + the 2031 color-scheme notification pushed to
+// claude/kimi when term_follow_appearance is on.
+func appearanceIsDark(_ view: NSView? = nil) -> Bool {
+    let ap = view?.effectiveAppearance ?? NSApp.effectiveAppearance
+    return ap.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+}
+// Whether the embedded terminal uses its DARK palette: follows the app appearance when
+// term_follow_appearance is on, else always dark (Kaku Dark). The terminal bg AND the
+// gutter/padding around it must both use this same predicate, or they mismatch (e.g.
+// follow-off + light system → dark terminal but a light gutter).
+func terminalIsDark(_ view: NSView? = nil) -> Bool {
+    !Conf.followAppearance || appearanceIsDark(view)
+}
+
 func applyTermTheme(_ tv: LocalProcessTerminalView) {
     let size = Conf.termFontSize
     // Try the configured font first, then sensible fallbacks, then the system
@@ -263,18 +300,26 @@ func applyTermTheme(_ tv: LocalProcessTerminalView) {
     if tv.font.pointSize != size { tv.font = .monospacedSystemFont(ofSize: size, weight: .regular) }
     tv.lineHeightMultiplier = Conf.lineHeight   // patched SwiftTerm: extra line spacing
     tv.configureNativeColors()   // adaptive default (used when soft colors are off)
-    // Soft (Kaku Dark) theme: the muted ANSI palette was tuned for Kaku's #15141b
-    // background, so on SwiftTerm's default background it looks off. Apply the
-    // whole thing together — 16-color palette + bg/fg/cursor. installColors needs
-    // exactly 16 or it no-ops.
+    // Soft (Kaku) theme: the muted ANSI palette was tuned for a specific bg, so it
+    // must be applied together with bg/fg/cursor. installColors needs exactly 16 or
+    // it no-ops. When term_follow_appearance is on we pick the dark or light Kaku
+    // variant from the current system appearance; off = always dark.
+    let dark = terminalIsDark(tv)
     if Conf.softColors {
-        tv.installColors(kakuAnsiPalette)
         let t = tv.getTerminal()
-        tv.setBackgroundColor(source: t, color: hexColor(0x15141b))                       // Kaku Dark bg
-        tv.setForegroundColor(source: t, color: hexColor(0xd5d4d6))                       // Kaku Dark fg
-        tv.setCursorColor(source: t, color: hexColor(0x8e6ad9), textColor: hexColor(0x15141b))  // purple caret
+        if dark {
+            tv.installColors(kakuAnsiPalette)
+            tv.setBackgroundColor(source: t, color: hexColor(0x15141b))                       // Kaku Dark bg
+            tv.setForegroundColor(source: t, color: hexColor(0xd5d4d6))                       // Kaku Dark fg
+            tv.setCursorColor(source: t, color: hexColor(0x8e6ad9), textColor: hexColor(0x15141b))  // purple caret
+        } else {
+            tv.installColors(kakuLightAnsiPalette)
+            tv.setBackgroundColor(source: t, color: hexColor(kakuLightBG))                    // Kaku Light bg
+            tv.setForegroundColor(source: t, color: hexColor(kakuLightFG))                    // Kaku Light fg
+            tv.setCursorColor(source: t, color: hexColor(0x8e6ad9), textColor: hexColor(kakuLightBG))  // purple caret
+        }
     } else {
-        tv.installColors(defaultAnsiPalette)
+        tv.installColors(defaultAnsiPalette)   // native (adaptive) bg/fg from configureNativeColors
     }
     // setCursorStyle no-ops when unchanged, so reapplyTheme() is idempotent; the
     // change reaches both renderers (CG CaretView + Metal buildCursorDrawData).
@@ -320,6 +365,23 @@ final class EmbeddedTerminalView: LocalProcessTerminalView {
         fullRepaintUntil = Date().addingTimeInterval(0.8)
         terminal?.updateFullScreen()
         needsDisplay = true
+    }
+    // System light/dark flipped while the app is running. Re-theme the SwiftTerm
+    // surface (bg + palette) and repaint the host gutter to match, then tell the app
+    // running inside so it can re-theme too — no restart needed. claude (theme:auto,
+    // injected via --settings) and kimi (tui.toml theme="auto") both subscribe to
+    // DEC mode 2031 (color-scheme change notifications) at startup, so pushing
+    // CSI ? 997 ; Ps n (Ps: 1=dark, 2=light) makes them re-read the terminal
+    // background (OSC 11, which SwiftTerm answers) and switch live. A plain shell
+    // ignores the notification and just tracks the surface. This is also what lets
+    // the Quake scratch shell follow the system in real time.
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        guard Conf.followAppearance else { return }
+        applyTermTheme(self)
+        superview?.layer?.backgroundColor = terminalHostBGColor(dark: terminalIsDark(self)).cgColor
+        let ps = appearanceIsDark(self) ? 1 : 2   // 2031 notification: 1=dark, 2=light
+        getTerminal().sendResponse(text: "\u{001B}[?997;\(ps)n")
     }
     // ── IME preedit (marked text) ────────────────────────────────────────────
     // SwiftTerm's NSTextInputClient marked-text methods are stubs: setMarkedText
@@ -653,7 +715,14 @@ final class TerminalManager: ObservableObject {
     // Re-apply font/size to every open terminal (called after Settings saves).
     // SwiftTerm's font setter recomputes cell size and repaints from its own
     // buffer, so this takes effect without reopening the session.
-    func reapplyTheme() { for v in views.values { applyTermTheme(v) } }
+    func reapplyTheme() {
+        for v in views.values {
+            applyTermTheme(v)
+            // Repaint the host gutter too, so a Settings toggle (soft colors /
+            // follow-appearance) matches immediately instead of on the next update.
+            v.superview?.layer?.backgroundColor = terminalHostBGColor(dark: terminalIsDark(v)).cgColor
+        }
+    }
 }
 
 final class TermDelegate: LocalProcessTerminalViewDelegate {
@@ -677,10 +746,12 @@ final class TermDelegate: LocalProcessTerminalViewDelegate {
 let terminalInnerPadding: CGFloat = 10
 
 // The color the host gutter is painted so it matches the terminal background:
-// Kaku Dark's #15141b when soft colors are on, otherwise the adaptive default.
-func terminalHostBGColor() -> NSColor {
-    Conf.softColors ? NSColor(srgbRed: 0x15/255, green: 0x14/255, blue: 0x1b/255, alpha: 1)
-                    : .textBackgroundColor
+// the Kaku bg (dark #15141b or light #fbfbfa) when soft colors are on, otherwise
+// the adaptive default. `dark` comes from the current appearance at the call site.
+func terminalHostBGColor(dark: Bool) -> NSColor {
+    guard Conf.softColors else { return .textBackgroundColor }
+    return dark ? NSColor(srgbRed: 0x15/255, green: 0x14/255, blue: 0x1b/255, alpha: 1)
+                : NSColor(srgbRed: 0xfb/255, green: 0xfb/255, blue: 0xfa/255, alpha: 1)
 }
 
 struct TerminalContainer: NSViewRepresentable {
@@ -698,11 +769,11 @@ struct TerminalContainer: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let host = NSView()
         host.wantsLayer = true
-        host.layer?.backgroundColor = terminalHostBGColor().cgColor
+        host.layer?.backgroundColor = terminalHostBGColor(dark: terminalIsDark(host)).cgColor
         return host
     }
     func updateNSView(_ host: NSView, context: Context) {
-        host.layer?.backgroundColor = terminalHostBGColor().cgColor   // keep gutter matching after a theme toggle
+        host.layer?.backgroundColor = terminalHostBGColor(dark: terminalIsDark(host)).cgColor   // keep gutter matching after a theme toggle
         let term = mgr.terminal(forSid: sid, cwd: cwd, kind: kind)
         for sub in host.subviews where sub !== term { sub.removeFromSuperview() }
         if term.superview !== host {

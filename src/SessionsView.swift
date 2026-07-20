@@ -825,7 +825,9 @@ struct SessionsView: View {
     private func terminalCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         content()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(terminalHostBGColor()))
+            // `scheme` is an @Environment read, so the card recolors live on a
+            // system appearance flip, same predicate as the terminal palette.
+            .background(Color(terminalHostBGColor(dark: !Conf.followAppearance || scheme == .dark)))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08)))

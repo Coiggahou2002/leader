@@ -29,7 +29,13 @@ def metadata() -> dict[str, dict]:
                     if entry.get("type") != "session_meta":
                         continue
                     p = entry.get("payload") or {}
-                    sid = p.get("session_id") or p.get("id")
+                    # `id` is this rollout's own id; `session_id` points at the
+                    # PARENT thread for continued/sub-agent rollouts. Key by `id`:
+                    # an archived thread's own rollout is moved out of sessions/,
+                    # but child rollouts referencing it via session_id stay behind
+                    # and would otherwise lend it a cwd, slipping it past the
+                    # archived filter below (codex resume then hard-errors).
+                    sid = p.get("id") or p.get("session_id")
                     if sid:
                         result[sid] = {"cwd": p.get("cwd"), "path": path}
                     break
@@ -45,9 +51,21 @@ def collect() -> list[dict]:
     except Exception:
         lines = []
     now = datetime.now(timezone.utc).timestamp()
+    # session_index.jsonl is append-only: Codex appends a fresh line whenever a
+    # thread's name/updated_at changes instead of rewriting the old one. Keep
+    # only the LAST line per session id, or one session renders as duplicate
+    # rows (duplicate SwiftUI ForEach ids — hovering one row highlights its
+    # same-id twin elsewhere in the list).
+    latest: dict[str, dict] = {}
     for line in lines:
         try:
             idx = json.loads(line)
+        except Exception:
+            continue
+        if idx.get("id"):
+            latest[idx["id"]] = idx
+    for idx in latest.values():
+        try:
             sid = idx.get("id")
             if not sid:
                 continue
